@@ -22,6 +22,24 @@ class DecisionRecord(BaseModel):
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
 
 
+# ─── Spec Artifact (optional user-provided technical specs) ──────────────────
+
+
+class SpecArtifact(BaseModel):
+    """
+    Optional technical specifications provided by the user.
+    Passed to Architecture and Engineering agents as constraints.
+    Testing Agent does NOT use this — it verifies against IntentArtifact only.
+    """
+
+    api_spec: Optional[str] = None          # OpenAPI / Swagger YAML or JSON
+    database_schema: Optional[str] = None   # SQL DDL, ER diagram description, etc.
+    architecture_constraints: Optional[str] = None  # e.g. "must use PostgreSQL, Redis"
+    tech_stack_constraints: Optional[str] = None    # e.g. "Python FastAPI, React"
+    additional_specs: Dict[str, str] = {}   # name -> content for any other specs
+    source_files: List[str] = []            # paths to spec files that were loaded
+
+
 # ─── Intent Agent ───────────────────────────────────────────────────────────
 
 
@@ -36,7 +54,7 @@ class IntentArtifact(BaseModel):
     key_features: List[str]
     tech_preferences: Optional[List[str]] = None
     domain_context: str
-    scope: str  # in-scope vs out-of-scope summary
+    scope: str
     risks: List[str] = []
     decisions: List[DecisionRecord] = []
 
@@ -45,8 +63,6 @@ class IntentArtifact(BaseModel):
 
 
 class ComponentSpec(BaseModel):
-    """Describes a single system component."""
-
     name: str
     responsibility: str
     interfaces: List[str]
@@ -58,7 +74,7 @@ class ArchitectureArtifact(BaseModel):
     """Output of the Architecture Agent — the system design blueprint."""
 
     system_overview: str
-    architecture_style: str  # e.g. microservices, monolith, serverless
+    architecture_style: str
     components: List[ComponentSpec]
     data_flow: List[str]
     api_design: List[str]
@@ -68,6 +84,7 @@ class ArchitectureArtifact(BaseModel):
     patterns_used: List[str]
     scalability_considerations: List[str]
     trade_offs: List[str]
+    spec_compliance_notes: List[str] = []  # how user specs were applied
     design_decisions: List[DecisionRecord]
 
 
@@ -75,8 +92,6 @@ class ArchitectureArtifact(BaseModel):
 
 
 class TechStack(BaseModel):
-    """Describes a technology choice for a tier."""
-
     framework: str
     language: str
     version: str
@@ -85,11 +100,9 @@ class TechStack(BaseModel):
 
 
 class FileSpec(BaseModel):
-    """Represents a file that should be created."""
-
     path: str
     purpose: str
-    content: str  # actual file content or detailed spec
+    content: str  # full file content or detailed implementation spec
 
 
 class ImplementationStep(BaseModel):
@@ -100,16 +113,17 @@ class ImplementationStep(BaseModel):
 
 
 class EngineeringArtifact(BaseModel):
-    """Output of the Engineering Agent — tech stack choices and code generation."""
+    """Output of the Engineering Agent — tech stack and implementation plan."""
 
     backend_tech: TechStack
     frontend_tech: Optional[TechStack] = None
     infrastructure: str
     generated_files: List[FileSpec]
     implementation_steps: List[ImplementationStep]
-    environment_variables: Dict[str, str] = {}  # key -> description
+    environment_variables: Dict[str, str] = {}
     api_endpoints: List[str] = []
     data_models: List[str] = []
+    spec_compliance_notes: List[str] = []  # how user specs were applied
     decisions: List[DecisionRecord]
 
 
@@ -117,18 +131,16 @@ class EngineeringArtifact(BaseModel):
 
 
 class Issue(BaseModel):
-    """A specific issue found during code review."""
-
-    severity: str  # critical | high | medium | low
-    category: str  # security | reliability | performance | maintainability | correctness
+    severity: str   # critical | high | medium | low
+    category: str   # security | reliability | performance | maintainability | correctness
     description: str
-    location: str  # file path or component name
+    location: str
     recommendation: str
-    cwe_id: Optional[str] = None  # Common Weakness Enumeration ID if applicable
+    cwe_id: Optional[str] = None
 
 
 class ReviewArtifact(BaseModel):
-    """Output of the Review Agent — quality assessment of the engineering output."""
+    """Output of the Review Agent — quality assessment."""
 
     overall_score: int = Field(ge=0, le=100)
     security_score: int = Field(ge=0, le=100)
@@ -139,7 +151,7 @@ class ReviewArtifact(BaseModel):
     strengths: List[str]
     critical_fixes_required: List[str]
     recommendations: List[str]
-    passed: bool  # True if no critical issues
+    passed: bool
     decisions: List[DecisionRecord]
 
 
@@ -147,28 +159,26 @@ class ReviewArtifact(BaseModel):
 
 
 class TestCase(BaseModel):
-    """A single test case verifying a requirement or behaviour."""
-
     id: str
     name: str
     description: str
     requirement_covered: str
-    test_type: str  # unit | integration | e2e | security | performance
+    test_type: str   # unit | integration | e2e | security | performance
     steps: List[str]
     expected_outcome: str
     actual_outcome: Optional[str] = None
-    status: Optional[str] = None  # passed | failed | skipped | pending
+    status: Optional[str] = None   # passed | failed | skipped | pending
 
 
 class TestingArtifact(BaseModel):
     """Output of the Testing Agent at a given pipeline stage."""
 
-    stage: str  # architecture | engineering | review
+    stage: str
     test_cases: List[TestCase]
-    coverage_areas: List[str]  # which requirements are covered
-    uncovered_areas: List[str]  # requirements NOT covered by tests
+    coverage_areas: List[str]
+    uncovered_areas: List[str]
     findings: List[str]
-    blocking_issues: List[str]  # issues that must be fixed before proceeding
+    blocking_issues: List[str]
     passed: bool
     recommendations: List[str]
     decisions: List[DecisionRecord]

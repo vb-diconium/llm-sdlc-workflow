@@ -1,16 +1,14 @@
 """
-Testing Agent — verifies the application at each pipeline stage against the original intent.
+Testing Agent — verifies the application at each pipeline stage.
 
-It runs three times:
-  Stage 1 (architecture):  Does the architecture actually satisfy the requirements?
-  Stage 2 (engineering):   Does the generated code implement the architecture and requirements?
-  Stage 3 (review):        After review fixes, does the system still meet all requirements?
+IMPORTANT: The Testing Agent ONLY uses IntentArtifact to derive test cases.
+It does NOT receive SpecArtifact — specs are an implementation concern for
+Architecture and Engineering; testing must validate against user intent only.
 
-Responsibilities:
-  - Generate test cases that map directly to each success criterion
-  - Identify gaps (requirements with no test coverage)
-  - Flag blocking issues that must be resolved before the pipeline proceeds
-  - Track test case status and provide actionable recommendations
+Runs at three stages:
+  architecture  — does the design satisfy requirements?
+  engineering   — does the implementation match the architecture and requirements?
+  review        — final check after review findings
 """
 
 from __future__ import annotations
@@ -24,62 +22,9 @@ from models.artifacts import (
     ReviewArtifact,
     TestingArtifact,
 )
-from .base_agent import BaseAgent
+from .base_agent import BaseAgent, load_prompt
 
-SYSTEM_PROMPT = """You are a principal QA engineer and test architect specialising in requirements-based testing,
-security testing, and continuous quality assurance.
-
-You will be given a pipeline stage and the artifacts produced up to that stage. Your job is to:
-
-1. Map EVERY success criterion from the IntentArtifact to one or more test cases
-2. Generate specific, actionable test cases (unit, integration, e2e, security, performance)
-3. Analyse each artifact against the test cases and determine pass/fail status
-4. Identify which requirements have NO test coverage (uncovered_areas)
-5. Flag blocking issues that must be resolved before the pipeline continues
-6. Provide clear recommendations for improving testability and quality
-
-Test case status rules:
-  - "passed"  — the artifact clearly satisfies this test case
-  - "failed"  — the artifact clearly violates or ignores this requirement
-  - "pending" — cannot determine without running the code (generate the test anyway)
-  - "skipped" — not applicable at this pipeline stage
-
-You MUST respond with a single JSON object wrapped in a ```json ... ``` block:
-
-{
-  "stage": "<architecture|engineering|review>",
-  "test_cases": [
-    {
-      "id": "TC-001",
-      "name": "<short test name>",
-      "description": "<what is being tested>",
-      "requirement_covered": "<which requirement/success criterion>",
-      "test_type": "unit|integration|e2e|security|performance",
-      "steps": ["<step 1>", "<step 2>", ...],
-      "expected_outcome": "<what should happen>",
-      "actual_outcome": "<what the artifact shows — or null if pending>",
-      "status": "passed|failed|pending|skipped"
-    }
-  ],
-  "coverage_areas": ["<requirement covered>", ...],
-  "uncovered_areas": ["<requirement NOT covered>", ...],
-  "findings": ["<notable finding>", ...],
-  "blocking_issues": ["<must-fix before proceeding>", ...],
-  "passed": <true if no blocking issues and no failed critical test cases>,
-  "recommendations": ["<recommendation>", ...],
-  "decisions": [
-    {
-      "decision": "<testing decision>",
-      "rationale": "<why>",
-      "alternatives_considered": ["<alt>"],
-      "trade_offs": ["<trade-off>"],
-      "timestamp": "<ISO 8601>"
-    }
-  ]
-}
-
-Generate at minimum one test case per success criterion. Be critical — it is better to flag a
-potential issue than to give a false green light."""
+SYSTEM_PROMPT = load_prompt("testing_agent.md")
 
 
 class TestingAgent(BaseAgent):
@@ -94,56 +39,42 @@ class TestingAgent(BaseAgent):
         engineering: Optional[EngineeringArtifact] = None,
         review: Optional[ReviewArtifact] = None,
     ) -> TestingArtifact:
-        """
-        Run testing verification for the given pipeline stage.
-
-        stage must be one of: "architecture", "engineering", "review"
-        """
         if stage not in ("architecture", "engineering", "review"):
             raise ValueError(f"Invalid stage: {stage!r}")
 
-        context_blocks = [
-            f"## Intent Artifact\n```json\n{intent.model_dump_json(indent=2)}\n```"
-        ]
+        # Intent is always the source of truth for test cases
+        context = f"## Intent (source of truth for all test cases)\n{self._compact(intent)}"
 
         if architecture:
-            context_blocks.append(
-                f"## Architecture Artifact\n```json\n{architecture.model_dump_json(indent=2)}\n```"
-            )
+            context += f"\n\n## Architecture (what was designed)\n{self._compact(architecture)}"
         if engineering:
-            context_blocks.append(
-                f"## Engineering Artifact\n```json\n{engineering.model_dump_json(indent=2)}\n```"
-            )
+            context += f"\n\n## Engineering (what was built)\n{self._compact(engineering)}"
         if review:
-            context_blocks.append(
-                f"## Review Artifact\n```json\n{review.model_dump_json(indent=2)}\n```"
-            )
+            context += f"\n\n## Review findings\n{self._compact(review)}"
 
-        stage_instructions = {
+        stage_instruction = {
             "architecture": (
-                "Verify that the Architecture Artifact correctly addresses ALL requirements and "
-                "success criteria from the Intent Artifact. Flag any requirement that the architecture "
-                "ignores, underspecifies, or contradicts."
+                "Verify the Architecture satisfies ALL requirements and success criteria "
+                "from the Intent. Flag any requirement the architecture ignores or contradicts."
             ),
             "engineering": (
-                "Verify that the Engineering Artifact implements the Architecture and satisfies all "
-                "requirements. Check that the generated code is complete, follows the architecture, "
-                "and that the implementation plan covers all features."
+                "Verify the Engineering implementation satisfies ALL requirements from the Intent "
+                "and follows the Architecture. Check completeness of the implementation plan."
             ),
             "review": (
-                "Perform final verification. Confirm that the review issues have been acknowledged, "
-                "that critical fixes are actionable, and that the overall system — intent + architecture "
-                "+ implementation + review — will deliver what was originally requested."
+                "Final verification: does the full system — intent + architecture + implementation "
+                "— deliver what was originally requested? Are review findings addressed?"
             ),
         }[stage]
 
         user_message = f"""Perform {stage.upper()} stage testing.
 
-{stage_instructions}
+{stage_instruction}
 
-{chr(10).join(context_blocks)}
+{context}
 
-Generate comprehensive test cases for this stage. Respond ONLY with the JSON block."""
+Test cases must be derived from the Intent's requirements and success criteria.
+Respond ONLY with the JSON block."""
 
         artifact = await self._query_and_parse(
             system=SYSTEM_PROMPT,

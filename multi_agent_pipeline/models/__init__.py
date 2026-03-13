@@ -1,5 +1,6 @@
 from .artifacts import (
     DecisionRecord,
+    SpecArtifact,
     IntentArtifact,
     ComponentSpec,
     ArchitectureArtifact,
@@ -15,6 +16,7 @@ from .artifacts import (
 
 __all__ = [
     "DecisionRecord",
+    "SpecArtifact",
     "IntentArtifact",
     "ComponentSpec",
     "ArchitectureArtifact",

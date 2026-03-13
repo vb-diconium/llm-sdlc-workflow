@@ -1,0 +1,39 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-Agent Pipeline — Configuration File
+#
+# Usage:
+#   python3.11 main.py --config pipeline.yaml
+#
+# All fields are optional. CLI flags always override values set here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Path to requirements file (relative to this config file, or absolute).
+# Overridden by --requirements on the CLI.
+# requirements: my_requirements.txt
+
+# Output directory for artifacts.
+# Overridden by --output-dir on the CLI.
+# output_dir: ./artifacts
+
+# ─── Spec-Driven Development ─────────────────────────────────────────────────
+# These constraints are forwarded to the Architecture and Engineering agents.
+# The Testing Agent always derives test cases from requirements only — never specs.
+spec:
+
+  # Technology stack constraints.
+  # Example: "Python FastAPI, PostgreSQL, Redis, Celery"
+  # Overridden by --tech-constraints on the CLI.
+  tech_constraints: null
+
+  # Architecture / deployment constraints.
+  # Example: "Microservices on Kubernetes, must support blue-green deploys"
+  # Overridden by --arch-constraints on the CLI.
+  arch_constraints: null
+
+  # Spec files: OpenAPI YAML/JSON, SQL schemas, or any other constraint document.
+  # Each file is auto-detected by extension and content.
+  # Overridden by --spec on the CLI.
+  files: []
+  #  - openapi.yaml        # OpenAPI / Swagger spec
+  #  - schema.sql          # Database schema (DDL)
+  #  - tech_requirements.md  # Any other constraint document

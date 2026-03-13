@@ -2,11 +2,21 @@
 Entry point for the Multi-Agent Pipeline.
 
 Usage:
-    python main.py                          # runs the built-in example
-    python main.py --requirements path.txt  # load requirements from a file
-    python main.py --interactive            # type/paste requirements interactively
+    python3.11 main.py                                  # built-in example
+    python3.11 main.py --requirements reqs.txt          # custom requirements
+    python3.11 main.py --interactive                    # type requirements
+    python3.11 main.py --config pipeline.yaml           # load from config file
+    python3.11 main.py --spec openapi.yaml              # provide a single spec file
+    python3.11 main.py --spec api.yaml --spec schema.sql  # multiple spec files
+    python3.11 main.py --tech-constraints "Python FastAPI, PostgreSQL, Redis"
+    python3.11 main.py --arch-constraints "Must be deployable on AWS Lambda"
 
-Each run creates a timestamped artifacts directory so runs never overwrite each other.
+Spec-driven development (via config file):
+  Copy pipeline.yaml, fill in the spec section, then:
+    python3.11 main.py --config pipeline.yaml
+
+  CLI flags always override values from the config file.
+  The Testing Agent derives test cases solely from requirements (IntentArtifact).
 """
 
 from __future__ import annotations
@@ -15,16 +25,18 @@ import argparse
 import os
 import sys
 from datetime import datetime
+from typing import Dict, List
+
+import yaml
 
 import anyio
 from rich.console import Console
 from rich.panel import Panel
 
+from models.artifacts import SpecArtifact
 from pipeline import Pipeline
 
 console = Console()
-
-# ─── Built-in example requirements ──────────────────────────────────────────
 
 EXAMPLE_REQUIREMENTS = """
 Build a task management REST API with the following features:
@@ -49,106 +61,203 @@ Non-functional requirements:
 - GDPR compliant (data export and deletion endpoints)
 
 Technology preferences: Python backend preferred, PostgreSQL for storage.
-"""
-
-
-# ─── Main ────────────────────────────────────────────────────────────────────
+""".strip()
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Multi-Agent Software Development Pipeline",
+        description="Multi-Agent Software Development Pipeline with Spec-Driven Development",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py                              # run built-in task-manager example
-  python main.py --requirements reqs.txt      # load from file
-  python main.py --interactive                # type requirements interactively
-  python main.py --output-dir ./my_artifacts  # custom artifacts directory
+  python3.11 main.py
+  python3.11 main.py --requirements reqs.txt
+  python3.11 main.py --config pipeline.yaml
+  python3.11 main.py --spec openapi.yaml --spec db_schema.sql
+  python3.11 main.py --tech-constraints "FastAPI, PostgreSQL, Redis, Celery"
+  python3.11 main.py --arch-constraints "Microservices on Kubernetes"
+  python3.11 main.py --requirements reqs.txt --spec api.yaml --tech-constraints "Python only"
         """,
     )
+    parser.add_argument("--requirements", help="Path to requirements text file")
+    parser.add_argument("--interactive", action="store_true", help="Enter requirements interactively")
+    parser.add_argument("--output-dir", help="Artifacts output directory")
     parser.add_argument(
-        "--requirements",
-        type=str,
-        help="Path to a text file containing requirements",
+        "--config", metavar="FILE",
+        help="Path to a pipeline.yaml config file (CLI flags override config values)"
     )
     parser.add_argument(
-        "--interactive",
-        action="store_true",
-        help="Enter requirements interactively (type, then Ctrl+D or Ctrl+Z to finish)",
+        "--spec", action="append", dest="spec_files", metavar="FILE",
+        help="Path to a spec file (OpenAPI YAML, SQL schema, etc.) — can be repeated"
     )
     parser.add_argument(
-        "--output-dir",
-        type=str,
-        default=None,
-        help="Directory to save artifacts (default: ./artifacts/run_<timestamp>)",
+        "--tech-constraints", metavar="STRING",
+        help='Technology constraints, e.g. "Python FastAPI, PostgreSQL, Redis"'
+    )
+    parser.add_argument(
+        "--arch-constraints", metavar="STRING",
+        help='Architecture constraints, e.g. "Must run on AWS Lambda, serverless"'
     )
     return parser.parse_args()
+
+
+def _apply_config(args: argparse.Namespace) -> None:
+    """Merge a pipeline.yaml config file into args. CLI flags take precedence."""
+    if not args.config:
+        return
+
+    config_path = args.config
+    if not os.path.exists(config_path):
+        console.print(f"[red]Config file not found: {config_path}[/red]")
+        sys.exit(1)
+
+    config_dir = os.path.dirname(os.path.abspath(config_path))
+    with open(config_path) as f:
+        cfg = yaml.safe_load(f) or {}
+
+    # requirements — only apply if not set by CLI
+    if not args.requirements and cfg.get("requirements"):
+        req_path = cfg["requirements"]
+        if not os.path.isabs(req_path):
+            req_path = os.path.join(config_dir, req_path)
+        args.requirements = req_path
+
+    # output_dir
+    if not args.output_dir and cfg.get("output_dir"):
+        args.output_dir = cfg["output_dir"]
+
+    # spec block
+    spec_cfg = cfg.get("spec") or {}
+
+    if not args.tech_constraints and spec_cfg.get("tech_constraints"):
+        args.tech_constraints = spec_cfg["tech_constraints"]
+
+    if not args.arch_constraints and spec_cfg.get("arch_constraints"):
+        args.arch_constraints = spec_cfg["arch_constraints"]
+
+    # spec files — only apply if not already provided via --spec
+    if not args.spec_files:
+        cfg_files = spec_cfg.get("files") or []
+        if cfg_files:
+            resolved = []
+            for p in cfg_files:
+                if not os.path.isabs(p):
+                    p = os.path.join(config_dir, p)
+                resolved.append(p)
+            args.spec_files = resolved
+
+    console.print(f"[dim]Config loaded from {config_path}[/dim]")
+
+
+def load_spec(args: argparse.Namespace) -> SpecArtifact | None:
+    """Build a SpecArtifact from CLI arguments."""
+    has_spec = any([args.spec_files, args.tech_constraints, args.arch_constraints])
+    if not has_spec:
+        return None
+
+    additional_specs: Dict[str, str] = {}
+    source_files: List[str] = []
+
+    if args.spec_files:
+        for path in args.spec_files:
+            if not os.path.exists(path):
+                console.print(f"[red]Spec file not found: {path}[/red]")
+                sys.exit(1)
+            with open(path) as f:
+                content = f.read()
+            ext = os.path.splitext(path)[1].lower()
+            name = os.path.basename(path)
+            source_files.append(path)
+
+            # Route to the right field based on extension / content
+            if ext in (".yaml", ".yml", ".json") and any(
+                k in content for k in ("openapi", "swagger", "paths:")
+            ):
+                additional_specs["api_spec"] = content
+            elif ext in (".sql", ".ddl") or "CREATE TABLE" in content.upper():
+                additional_specs["database_schema"] = content
+            else:
+                additional_specs[name] = content
+
+    spec = SpecArtifact(
+        api_spec=additional_specs.pop("api_spec", None),
+        database_schema=additional_specs.pop("database_schema", None),
+        tech_stack_constraints=args.tech_constraints,
+        architecture_constraints=args.arch_constraints,
+        additional_specs=additional_specs,
+        source_files=source_files,
+    )
+
+    parts = []
+    if spec.api_spec:
+        parts.append("API spec")
+    if spec.database_schema:
+        parts.append("DB schema")
+    if spec.tech_stack_constraints:
+        parts.append(f"tech: {spec.tech_stack_constraints}")
+    if spec.architecture_constraints:
+        parts.append(f"arch: {spec.architecture_constraints}")
+    parts += list(spec.additional_specs.keys())
+
+    console.print(Panel(
+        "Spec-driven mode enabled.\n"
+        "Architecture + Engineering will honour these specs.\n"
+        "Testing Agent will still verify against requirements only.\n\n"
+        "Specs loaded: " + ", ".join(parts),
+        title="[bold yellow]Spec-Driven Development[/bold yellow]",
+    ))
+    return spec
 
 
 def get_requirements(args: argparse.Namespace) -> str:
     if args.requirements:
         with open(args.requirements) as f:
-            requirements = f.read().strip()
-        console.print(f"[dim]Loaded requirements from {args.requirements}[/dim]")
-        return requirements
-
+            return f.read().strip()
     if args.interactive:
-        console.print(
-            Panel(
-                "Enter your requirements below.\n"
-                "Press [bold]Ctrl+D[/bold] (Unix) or [bold]Ctrl+Z[/bold] (Windows) when done.",
-                title="Interactive Mode",
-            )
-        )
-        try:
-            lines = sys.stdin.read()
-            return lines.strip()
-        except EOFError:
-            pass
-
-    # Default: use the built-in example
-    console.print(
-        Panel(
-            "No requirements provided — using built-in Task Management API example.\n\n"
-            "Run with [bold]--requirements path.txt[/bold] or [bold]--interactive[/bold] "
-            "to use your own requirements.",
-            title="[yellow]Using Example Requirements[/yellow]",
-        )
-    )
-    return EXAMPLE_REQUIREMENTS.strip()
+        console.print(Panel(
+            "Enter requirements. Press Ctrl+D (Unix) or Ctrl+Z (Windows) when done.",
+            title="Interactive Mode",
+        ))
+        return sys.stdin.read().strip()
+    console.print(Panel(
+        "No requirements provided — using built-in Task Management API example.\n\n"
+        "Run with [bold]--requirements path.txt[/bold] to use your own.",
+        title="[yellow]Using Example Requirements[/yellow]",
+    ))
+    return EXAMPLE_REQUIREMENTS
 
 
-async def async_main(args: argparse.Namespace, requirements: str) -> int:
+async def async_main(args: argparse.Namespace, requirements: str, spec) -> int:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     artifacts_dir = args.output_dir or os.path.join("artifacts", f"run_{timestamp}")
 
-    console.print(
-        Panel(
-            f"[bold]Requirements preview:[/bold]\n{requirements[:300]}{'...' if len(requirements) > 300 else ''}\n\n"
-            f"[dim]Artifacts will be saved to: {artifacts_dir}[/dim]",
-            title="Starting Pipeline",
-        )
-    )
+    console.print(Panel(
+        f"[bold]Requirements preview:[/bold]\n{requirements[:300]}"
+        f"{'...' if len(requirements) > 300 else ''}\n\n"
+        f"[dim]Artifacts → {artifacts_dir}[/dim]",
+        title="Starting Pipeline",
+    ))
 
     pipeline = Pipeline(artifacts_dir=artifacts_dir)
-    result = await pipeline.run(requirements)
+    result = await pipeline.run(requirements, spec=spec)
     pipeline.print_summary(result)
     return 0 if result.passed else 1
 
 
 def main() -> int:
     args = parse_args()
+    _apply_config(args)
     requirements = get_requirements(args)
-
     if not requirements:
         console.print("[red]Error: No requirements provided.[/red]")
         return 1
 
+    spec = load_spec(args)
+
     try:
-        return anyio.run(async_main, args, requirements)
+        return anyio.run(async_main, args, requirements, spec)
     except KeyboardInterrupt:
-        console.print("\n[yellow]Pipeline interrupted by user.[/yellow]")
+        console.print("\n[yellow]Pipeline interrupted.[/yellow]")
         return 130
 
 
