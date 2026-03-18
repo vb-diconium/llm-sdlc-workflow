@@ -322,15 +322,265 @@ pip install -r requirements.txt
 
 ### Authentication
 
-The pipeline uses the **GitHub Models API** (OpenAI-compatible endpoint, model: `gpt-4o`) authenticated via your GitHub Copilot token. No `.env` file or additional API credits are needed.
+The pipeline calls the **GitHub Models API** — an OpenAI-compatible endpoint hosted by GitHub (backed by Azure). Authentication uses your existing **GitHub Copilot token**. No `.env` file, no OpenAI account, and no separate API credits are required.
+
+#### How the token is resolved (automatic, in order)
+
+The pipeline tries two methods at startup and uses the first that succeeds:
+
+| Priority | Method | How to set it up |
+|---|---|---|
+| 1 | `GITHUB_TOKEN` environment variable | `export GITHUB_TOKEN=$(gh auth token)` |
+| 2 | GitHub CLI — `gh auth token` | Install `gh` and run `gh auth login` once |
+
+If neither is available the pipeline exits immediately with a clear error message.
+
+#### Option A — GitHub CLI (recommended, zero configuration)
 
 ```bash
-# One-time: authenticate with GitHub CLI
+# 1. Install the GitHub CLI (if not already installed)
+#    macOS:
+brew install gh
+#    Linux:
+sudo apt install gh   # or: https://cli.github.com/
+
+# 2. Authenticate once — opens a browser flow
 gh auth login
 
-# Verify (pipeline calls this automatically at startup)
+# 3. Verify the token is accessible (the pipeline calls this automatically)
 gh auth token
+
+# 4. Run the pipeline — no further setup needed
+python3.11 main.py --requirements my_requirements.txt
 ```
+
+> The pipeline calls `gh auth token` programmatically at startup. As long as your CLI session is active, nothing else is needed.
+
+#### Option B — Personal Access Token (PAT) via environment variable
+
+Use this for CI/CD pipelines, Docker containers, or environments where the GitHub CLI is not available.
+
+```bash
+# 1. Create a fine-grained PAT at: https://github.com/settings/tokens
+#    Required permission: Models → Read-only  (listed as "models:read")
+#    No repository or organisation permissions needed.
+
+# 2. Export the token in your shell session
+export GITHUB_TOKEN=github_pat_XXXXXXXXXXXXXXXXXXXX
+
+# 3. (Optional) Add to your shell profile to persist across sessions
+echo 'export GITHUB_TOKEN=github_pat_XXXXXXXXXXXXXXXXXXXX' >> ~/.zshrc
+
+# 4. Run the pipeline
+python3.11 main.py --requirements my_requirements.txt
+```
+
+> **Never hardcode the token in source files or commit it to git.** The `.gitignore` in this repo already excludes `.env` and `.env.*` files — store it there if you prefer a file-based approach:
+> ```bash
+> echo 'GITHUB_TOKEN=github_pat_XXXXXXXXXXXXXXXXXXXX' >> .env
+> source .env   # or use direnv / dotenv
+> ```
+
+#### Required: GitHub Copilot licence
+
+GitHub Models access is **included with every GitHub Copilot plan** (Free, Pro, Business, Enterprise). The plan determines your daily rate limits:
+
+| Model tier | Model examples | Copilot Free/Pro | Copilot Business | Copilot Enterprise |
+|---|---|---|---|---|
+| **High** | `gpt-4o` (default) | **50 req/day** | **100 req/day** | **150 req/day** |
+| **Low** | `gpt-4o-mini` | **150 req/day** | **300 req/day** | **450 req/day** |
+| Concurrent requests | all models | 2 | 2 | 4 |
+
+> `gpt-4o` is a **High** model. A full pipeline run makes many calls (one per agent plus chunked file generation), so it can exhaust the daily quota. See [Choosing a model](#choosing-a-model) below.
+
+#### Choosing a model
+
+Override the default `gpt-4o` with the `--model` flag or the `PIPELINE_MODEL` environment variable:
+
+```bash
+# Cheaper, 3× higher daily limit — good for experimentation
+python3.11 main.py --requirements reqs.txt --model gpt-4o-mini
+
+# Set a persistent default
+export PIPELINE_MODEL=gpt-4o-mini
+```
+
+| Use case | Recommended model | Daily limit (Pro) |
+|---|---|---|
+| Full production pipeline | `gpt-4o` | 50 req/day |
+| Rapid iteration / experimentation | `gpt-4o-mini` | 150 req/day |
+| Best quality, slow | `o3-mini` | 12 req/day |
+
+#### Rate limit errors
+
+If you hit the daily quota you will see:
+
+```
+Error code: 429 - Rate limit of 100 per 86400s exceeded for UserByModelByDay.
+Please wait 69116 seconds before retrying.
+```
+
+Options:
+- **Wait** — the quota resets every 24 hours.
+- **Switch models** — `--model gpt-4o-mini` has a 3× higher daily allowance.
+- **Use your own API key** — see [Bring Your Own API Key](#bring-your-own-api-key) below.
+
+#### Bring Your Own API Key
+
+Two environment variables let you swap the provider without touching any code:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `PIPELINE_BASE_URL` | API endpoint (any OpenAI-compatible URL) | `https://models.inference.ai.azure.com` |
+| `PIPELINE_API_KEY` | API key for the provider (overrides GitHub token resolution) | _(uses GitHub token)_ |
+| `PIPELINE_MODEL` | Model name | `gpt-4o` |
+
+When `PIPELINE_API_KEY` is set, `GITHUB_TOKEN` and `gh auth token` are ignored entirely.
+
+---
+
+#### Available models on GitHub Models (no code changes, no extra account)
+
+All of these work with your existing GitHub token and the `--model` flag. GitHub Models hosts models from multiple providers:
+
+```bash
+# xAI Grok — available directly on GitHub Models
+python3.11 main.py --requirements reqs.txt --model xai-grok-3
+python3.11 main.py --requirements reqs.txt --model xai-grok-3-mini   # higher rate limit
+
+# DeepSeek R1 (open-weight reasoning model)
+python3.11 main.py --requirements reqs.txt --model DeepSeek-R1
+
+# Meta Llama 3
+python3.11 main.py --requirements reqs.txt --model meta-llama-3.1-405b-instruct
+
+# Mistral (hosted on GitHub Models)
+python3.11 main.py --requirements reqs.txt --model Mistral-large-2411
+
+# Microsoft Phi
+python3.11 main.py --requirements reqs.txt --model Phi-4
+```
+
+> Browse the full catalogue at [github.com/marketplace/models](https://github.com/marketplace/models). Use the exact model name shown there as the `--model` value.
+
+---
+
+#### OpenAI (direct, bypasses GitHub Models)
+
+```bash
+export PIPELINE_API_KEY=sk-...                    # your OpenAI API key
+export PIPELINE_BASE_URL=https://api.openai.com/v1
+export PIPELINE_MODEL=gpt-4o                     # or gpt-4o-mini, o3-mini, etc.
+
+python3.11 main.py --requirements reqs.txt
+```
+
+---
+
+#### xAI Grok (direct API)
+
+xAI's API is fully OpenAI-compatible — swap the endpoint and key:
+
+```bash
+export PIPELINE_API_KEY=xai-...                   # from console.x.ai
+export PIPELINE_BASE_URL=https://api.x.ai/v1
+export PIPELINE_MODEL=grok-3-beta                # or grok-3-mini-beta
+
+python3.11 main.py --requirements reqs.txt
+```
+
+---
+
+#### Google Gemini
+
+Google exposes an OpenAI-compatible endpoint for Gemini models:
+
+```bash
+export PIPELINE_API_KEY=AIza...                   # from aistudio.google.com/app/apikey
+export PIPELINE_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+export PIPELINE_MODEL=gemini-2.0-flash           # or gemini-2.5-pro-preview-03-25
+
+python3.11 main.py --requirements reqs.txt
+```
+
+> Get a free API key at [aistudio.google.com](https://aistudio.google.com/app/apikey) — no billing required for Gemini Flash.
+
+---
+
+#### Mistral (direct API)
+
+```bash
+export PIPELINE_API_KEY=...                       # from console.mistral.ai
+export PIPELINE_BASE_URL=https://api.mistral.ai/v1
+export PIPELINE_MODEL=mistral-large-latest       # or mistral-small-latest
+
+python3.11 main.py --requirements reqs.txt
+```
+
+---
+
+#### Anthropic Claude
+
+Anthropic's native API is **not** OpenAI-compatible. The recommended approach is to use a local proxy such as [LiteLLM](https://github.com/BerriAI/litellm) which translates the OpenAI format to Anthropic's Messages API:
+
+```bash
+# 1. Install and start LiteLLM proxy
+pip install litellm[proxy]
+ANTHROPIC_API_KEY=sk-ant-... litellm --model claude-opus-4-5 --port 4000
+
+# 2. Point the pipeline at the local proxy
+export PIPELINE_API_KEY=anything           # LiteLLM accepts any non-empty key
+export PIPELINE_BASE_URL=http://localhost:4000
+export PIPELINE_MODEL=claude-opus-4-5
+
+python3.11 main.py --requirements reqs.txt
+```
+
+Alternatively, use Claude through **AWS Bedrock** (OpenAI-compatible via Amazon's converse API) or **Google Vertex AI** (OpenAI-compatible):
+
+```bash
+# AWS Bedrock via LiteLLM
+AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+  litellm --model bedrock/anthropic.claude-opus-4-5-20251101-v1:0 --port 4000
+```
+
+---
+
+#### Local models via Ollama
+
+Run any model locally with [Ollama](https://ollama.com) — no internet, no API costs:
+
+```bash
+# 1. Install Ollama and pull a model
+brew install ollama
+ollama pull llama3.3         # or mistral, phi4, deepseek-r1, etc.
+ollama serve                 # starts on http://localhost:11434
+
+# 2. Point the pipeline at Ollama's OpenAI-compatible endpoint
+export PIPELINE_API_KEY=ollama            # any non-empty string
+export PIPELINE_BASE_URL=http://localhost:11434/v1
+export PIPELINE_MODEL=llama3.3
+
+python3.11 main.py --requirements reqs.txt
+```
+
+> ⚠️ Local models are generally less capable at structured JSON generation than frontier models. The pipeline uses `response_format: json_object` — ensure your chosen Ollama model supports it (Llama 3.3, Mistral, Phi-4 do).
+
+---
+
+#### Provider quick-reference
+
+| Provider | `PIPELINE_BASE_URL` | `PIPELINE_API_KEY` source | Recommended model |
+|---|---|---|---|
+| GitHub Models _(default)_ | `https://models.inference.ai.azure.com` | `gh auth token` / `GITHUB_TOKEN` | `gpt-4o` |
+| OpenAI | `https://api.openai.com/v1` | [platform.openai.com](https://platform.openai.com/api-keys) | `gpt-4o` |
+| xAI Grok | `https://api.x.ai/v1` | [console.x.ai](https://console.x.ai) | `grok-3-beta` |
+| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` | [aistudio.google.com](https://aistudio.google.com/app/apikey) | `gemini-2.0-flash` |
+| Mistral | `https://api.mistral.ai/v1` | [console.mistral.ai](https://console.mistral.ai) | `mistral-large-latest` |
+| Anthropic Claude | via LiteLLM proxy | [console.anthropic.com](https://console.anthropic.com) | `claude-opus-4-5` |
+| Ollama (local) | `http://localhost:11434/v1` | any string | `llama3.3` |
+
+> With your own key, rate limits and billing are managed entirely by your chosen provider — not GitHub.
 
 ---
 

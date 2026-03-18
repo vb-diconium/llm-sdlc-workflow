@@ -1,5 +1,5 @@
 """
-Base agent — GitHub Models (OpenAI-compatible) with:
+Base agent — supports GitHub Models and any OpenAI-compatible provider:
   - Compact context formatting (passes summaries, not raw JSON blobs)
   - Retry logic (3 attempts with backoff)
   - GitHub token auto-resolved via GITHUB_TOKEN env var or 'gh auth token'
@@ -8,8 +8,17 @@ Base agent — GitHub Models (OpenAI-compatible) with:
   - Prompt loading from prompts/ directory
 
 Environment variables:
-  GITHUB_TOKEN   — GitHub personal access token (falls back to 'gh auth token')
-  PIPELINE_MODEL — model name to use (default: gpt-4o)
+  GITHUB_TOKEN      — GitHub token for GitHub Models (falls back to 'gh auth token')
+  PIPELINE_API_KEY  — API key override for non-GitHub providers (OpenAI, xAI, Google, Mistral…)
+                      When set, GITHUB_TOKEN / gh auth token are NOT used.
+  PIPELINE_BASE_URL — API base URL (default: https://models.inference.ai.azure.com)
+                      Override to point at any OpenAI-compatible endpoint:
+                        OpenAI   → https://api.openai.com/v1
+                        xAI      → https://api.x.ai/v1
+                        Google   → https://generativelanguage.googleapis.com/v1beta/openai/
+                        Mistral  → https://api.mistral.ai/v1
+                        Ollama   → http://localhost:11434/v1
+  PIPELINE_MODEL    — model name to use (default: gpt-4o)
 """
 
 from __future__ import annotations
@@ -57,10 +66,13 @@ console = Console()
 MAX_RETRIES = 3
 RETRY_DELAY = 5        # seconds between retries
 
-# GitHub Models endpoint — works with any GitHub token (gh auth token)
+# Default endpoint — GitHub Models (OpenAI-compatible, Azure-hosted)
 _GITHUB_MODELS_URL = "https://models.inference.ai.azure.com"
 
-# Override via env vars if needed
+# Override the endpoint via PIPELINE_BASE_URL to use any OpenAI-compatible provider
+_BASE_URL = os.getenv("PIPELINE_BASE_URL", _GITHUB_MODELS_URL)
+
+# Override the model via PIPELINE_MODEL or --model CLI flag
 _DEFAULT_MODEL = os.getenv("PIPELINE_MODEL", "gpt-4o")
 
 
@@ -78,12 +90,27 @@ def _get_github_token() -> str:
     except (FileNotFoundError, subprocess.CalledProcessError):
         pass
     raise EnvironmentError(
-        "No GitHub token found. Set GITHUB_TOKEN or run 'gh auth login'."
+        "No GitHub token found. Set GITHUB_TOKEN or run 'gh auth login'.\n"
+        "For non-GitHub providers set PIPELINE_API_KEY instead."
     )
 
 
+def _get_api_key() -> str:
+    """Return the API key for the configured provider.
+
+    PIPELINE_API_KEY takes priority — use this for OpenAI, xAI, Google,
+    Mistral, or any other non-GitHub provider.
+    Falls back to GitHub token resolution for GitHub Models.
+    """
+    key = os.getenv("PIPELINE_API_KEY")
+    if key:
+        return key
+    return _get_github_token()
+
+
 def _make_client() -> AsyncOpenAI:
-    return AsyncOpenAI(base_url=_GITHUB_MODELS_URL, api_key=_get_github_token())
+    """Create an AsyncOpenAI client pointed at the configured provider endpoint."""
+    return AsyncOpenAI(base_url=_BASE_URL, api_key=_get_api_key())
 
 
 class BaseAgent:
