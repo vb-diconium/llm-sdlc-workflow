@@ -315,8 +315,8 @@ Keep one `pipeline.yaml` per project — each file is completely self-contained.
 **Prerequisites:** Python 3.11+, Docker, GitHub account with a Copilot licence, GitHub CLI (`gh`).
 
 ```bash
-git clone https://github.com/vb-diconium/multi-agent-pipeline.git
-cd multi-agent-pipeline
+git clone https://github.com/vb-diconium/llm-sdlc-workflow.git
+cd llm-sdlc-workflow
 pip install -r requirements.txt
 ```
 
