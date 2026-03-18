@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Multi-Agent Pipeline — Configuration File
+# LLM SDLC Workflow — Configuration File
 #
 # Usage:
 #   python3.11 main.py --config pipeline.yaml

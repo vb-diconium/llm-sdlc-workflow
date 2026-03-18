@@ -1,5 +1,5 @@
 """
-Artifact data models for all agents in the multi-agent pipeline.
+Artifact data models for all workflow steps in the LLM SDLC pipeline.
 Each agent produces a typed artifact that is persisted to disk and
 passed downstream as context.
 """

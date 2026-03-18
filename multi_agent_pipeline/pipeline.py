@@ -132,7 +132,7 @@ class Pipeline:
         )
 
         console.print(Panel(
-            "[bold]🚀 Multi-Agent Pipeline Starting[/bold]\n\n"
+            "[bold]🚀 LLM SDLC Workflow Starting[/bold]\n\n"
             "Discovery → Architecture → [Test] → Spec → "
             "[Engineering ‖ Infrastructure] → "
             "Review loop (max " + str(MAX_REVIEW_ITERATIONS) + ") → "

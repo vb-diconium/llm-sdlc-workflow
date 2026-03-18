@@ -1,4 +1,4 @@
-# Multi-Agent SDLC Pipeline
+# LLM SDLC Workflow
 
 > Turn raw requirements into a running full-stack monorepo application — automatically.
 > Spec-driven, contract-first, and designed to extend incrementally across your entire SDLC.
@@ -452,7 +452,7 @@ The `generated/specs/` directory is what `--from-run` reads on the next run.
 ## Project Structure
 
 ```
-multi_agent_pipeline/
+llm_sdlc_workflow/
 ├── main.py                     # CLI entry point — all flags including --from-run
 ├── pipeline.py                 # 8-step orchestrator
 ├── pipeline.yaml               # project config template — copy and edit per project

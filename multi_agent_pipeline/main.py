@@ -1,5 +1,5 @@
 """
-Entry point for the Multi-Agent Pipeline.
+Entry point for the LLM SDLC Workflow.
 
 Usage:
     python3.11 main.py                                  # built-in example
@@ -75,7 +75,7 @@ Technology preferences: Python backend preferred, PostgreSQL for storage.
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Multi-Agent Software Development Pipeline with Spec-Driven Development",
+        description="LLM SDLC Workflow — spec-driven full-stack code generation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
