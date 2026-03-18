@@ -9,6 +9,9 @@ These tests cover pure logic that does NOT require a live LLM connection:
   - BaseAgent.save_artifact() / load_artifact()
   - BaseAgent._run_with_retry() — retry / backoff logic (LLM call mocked)
   - BaseAgent._compact()       — context summarisation
+  - BaseAgent._query_and_parse_chunked() — two-phase plan+fill generation
+  - main_entry.main()          — package entry point
+  - __main__ module            — python -m llm_sdlc_workflow
 """
 
 from __future__ import annotations
@@ -16,7 +19,7 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -358,3 +361,327 @@ class TestCompact:
         result = self.agent._compact(self._make_artifact())
         # Should have markdown bold labels
         assert "**" in result
+
+
+# ─── BaseAgent._query_and_parse_chunked ───────────────────────────────────────
+
+
+class TestQueryAndParseChunked:
+    """Two-phase plan+fill chunked generation."""
+
+    def _make_plan_response(self, with_pending: bool = True) -> str:
+        """Minimal valid EngineeringArtifact JSON — files optionally PENDING."""
+        content = "__PENDING__" if with_pending else "fun main() {}"
+        return json.dumps({
+            "service_name": "backend",
+            "services": {},
+            "generated_files": [
+                {"path": "src/main.kt", "purpose": "Entry point", "content": content},
+            ],
+            "api_endpoints": [],
+            "data_models": [],
+            "environment_variables": {},
+            "implementation_steps": [],
+            "spec_compliance_notes": [],
+            "decisions": [],
+            "review_iteration": 1,
+            "review_feedback_applied": [],
+        })
+
+    def _make_fill_response(self) -> str:
+        return json.dumps({"content": "fun main() { println(\"Hello\") }"})
+
+    async def test_no_pending_files_skips_fill_phase(self, tmp_path):
+        from llm_sdlc_workflow.models.artifacts import EngineeringArtifact
+        agent = BaseAgent(name="chunked-test", artifacts_dir=str(tmp_path))
+        plan_mock = AsyncMock(return_value=self._make_plan_response(with_pending=False))
+        agent._run_with_retry = plan_mock
+        with patch("asyncio.sleep", new=AsyncMock()):
+            result = await agent._query_and_parse_chunked(
+                system="sys",
+                plan_message="plan",
+                file_keys=["generated_files"],
+                model_class=EngineeringArtifact,
+            )
+        assert isinstance(result, EngineeringArtifact)
+        # _run_with_retry called exactly once (plan phase only)
+        assert plan_mock.call_count == 1
+
+    async def test_pending_file_triggers_fill_phase(self, tmp_path):
+        from llm_sdlc_workflow.models.artifacts import EngineeringArtifact
+        agent = BaseAgent(name="chunked-test", artifacts_dir=str(tmp_path))
+        plan_mock = AsyncMock(return_value=self._make_plan_response(with_pending=True))
+        fill_mock = AsyncMock(return_value=self._make_fill_response())
+        agent._run_with_retry = plan_mock
+        agent._raw_query = fill_mock
+        with patch("asyncio.sleep", new=AsyncMock()):
+            result = await agent._query_and_parse_chunked(
+                system="sys",
+                plan_message="plan",
+                file_keys=["generated_files"],
+                model_class=EngineeringArtifact,
+            )
+        assert fill_mock.call_count == 1
+        assert result.generated_files[0].content == "fun main() { println(\"Hello\") }"
+
+    async def test_fill_with_template_uses_template_vars(self, tmp_path):
+        from llm_sdlc_workflow.models.artifacts import EngineeringArtifact
+        agent = BaseAgent(name="chunked-test", artifacts_dir=str(tmp_path))
+        agent._run_with_retry = AsyncMock(return_value=self._make_plan_response(with_pending=True))
+        fill_mock = AsyncMock(return_value=self._make_fill_response())
+        agent._raw_query = fill_mock
+        tmpl = "Generate {path} for purpose: {purpose}. arch={arch_style}"
+        with patch("asyncio.sleep", new=AsyncMock()):
+            await agent._query_and_parse_chunked(
+                system="sys",
+                plan_message="plan",
+                file_keys=["generated_files"],
+                model_class=EngineeringArtifact,
+                fill_message_tmpl=tmpl,
+                fill_context={"arch_style": "monolith"},
+            )
+        fill_call_msg = fill_mock.call_args[0][1]
+        assert "src/main.kt" in fill_call_msg
+        assert "monolith" in fill_call_msg
+
+    async def test_raises_on_empty_plan_response(self, tmp_path):
+        from llm_sdlc_workflow.models.artifacts import EngineeringArtifact
+        agent = BaseAgent(name="chunked-test", artifacts_dir=str(tmp_path))
+        agent._run_with_retry = AsyncMock(return_value="")
+        with pytest.raises(ValueError, match="empty response"):
+            await agent._query_and_parse_chunked(
+                system="sys",
+                plan_message="plan",
+                file_keys=["generated_files"],
+                model_class=EngineeringArtifact,
+            )
+
+    async def test_fill_failure_falls_back_to_todo_comment(self, tmp_path):
+        from llm_sdlc_workflow.models.artifacts import EngineeringArtifact
+        agent = BaseAgent(name="chunked-test", artifacts_dir=str(tmp_path))
+        agent._run_with_retry = AsyncMock(return_value=self._make_plan_response(with_pending=True))
+        agent._raw_query = AsyncMock(side_effect=RuntimeError("fill error"))
+        with patch("asyncio.sleep", new=AsyncMock()):
+            result = await agent._query_and_parse_chunked(
+                system="sys",
+                plan_message="plan",
+                file_keys=["generated_files"],
+                model_class=EngineeringArtifact,
+            )
+        # Should fall back to a TODO comment rather than raising
+        assert "TODO" in result.generated_files[0].content
+
+
+# ─── main_entry and __main__ ──────────────────────────────────────────────────
+
+
+class TestMainEntry:
+    def test_main_entry_exists(self):
+        from llm_sdlc_workflow import main_entry
+        assert hasattr(main_entry, "main")
+        assert callable(main_entry.main)
+
+    def test_main_returns_int_when_main_py_missing(self, tmp_path, monkeypatch):
+        """main() returns 1 and prints error when main.py cannot be found."""
+        from llm_sdlc_workflow import main_entry
+        # Patch os.path.exists inside main_entry to force the "not found" branch
+        with patch("llm_sdlc_workflow.main_entry.os.path.exists", return_value=False):
+            result = main_entry.main()
+        assert result == 1
+
+    def test_dunder_main_module_importable(self):
+        import llm_sdlc_workflow.__main__ as m
+        assert hasattr(m, "main")
+
+    def test_main_returns_result_when_main_py_found(self, tmp_path):
+        """main() loads main.py and calls its main() when file exists."""
+        import importlib.util
+        from llm_sdlc_workflow import main_entry
+
+        # Build a fake module with a main() that returns 42
+        fake_spec = MagicMock()
+        fake_mod = MagicMock()
+        fake_mod.main = MagicMock(return_value=42)
+
+        with patch("llm_sdlc_workflow.main_entry.os.path.exists", return_value=True):
+            with patch("llm_sdlc_workflow.main_entry.importlib.util.spec_from_file_location",
+                       return_value=fake_spec):
+                with patch("llm_sdlc_workflow.main_entry.importlib.util.module_from_spec",
+                           return_value=fake_mod):
+                    result = main_entry.main()
+
+        assert result == 42
+
+
+# ─── _raw_query, _make_client, _get_semaphore ─────────────────────────────────
+
+
+class TestRawQueryAndSemaphore:
+    async def test_raw_query_calls_openai_client(self, tmp_path, monkeypatch):
+        """_raw_query builds a client and calls chat.completions.create."""
+        monkeypatch.setenv("PIPELINE_API_KEY", "test-key")
+        import llm_sdlc_workflow.agents.base_agent as bm
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '{"ok": true}'
+
+        mock_client = AsyncMock()
+        mock_client.chat = MagicMock()
+        mock_client.chat.completions = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        with patch.object(bm, "_make_client", return_value=mock_client):
+            with patch.object(bm, "_get_semaphore", return_value=AsyncMock(__aenter__=AsyncMock(return_value=None), __aexit__=AsyncMock(return_value=False))):
+                agent = BaseAgent(name="raw-test", artifacts_dir=str(tmp_path))
+                result = await agent._raw_query("system prompt", "user message")
+
+        assert result == '{"ok": true}'
+
+    async def test_raw_query_returns_empty_string_when_content_is_none(self, tmp_path, monkeypatch):
+        """_raw_query returns '' when message.content is None."""
+        monkeypatch.setenv("PIPELINE_API_KEY", "test-key")
+        import llm_sdlc_workflow.agents.base_agent as bm
+
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = None
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        with patch.object(bm, "_make_client", return_value=mock_client):
+            with patch.object(bm, "_get_semaphore", return_value=AsyncMock(__aenter__=AsyncMock(return_value=None), __aexit__=AsyncMock(return_value=False))):
+                agent = BaseAgent(name="raw-test", artifacts_dir=str(tmp_path))
+                result = await agent._raw_query("system prompt", "user message")
+
+        assert result == ""
+
+    def test_make_client_returns_async_openai(self, monkeypatch):
+        """_make_client() instantiates AsyncOpenAI with configured base_url/api_key."""
+        monkeypatch.setenv("PIPELINE_API_KEY", "sk-test-key")
+        import llm_sdlc_workflow.agents.base_agent as bm
+        from openai import AsyncOpenAI
+
+        with patch("llm_sdlc_workflow.agents.base_agent.AsyncOpenAI") as mock_cls:
+            mock_cls.return_value = MagicMock()
+            bm._make_client()
+
+        mock_cls.assert_called_once()
+
+    def test_get_semaphore_creates_semaphore_when_none(self):
+        """_get_semaphore() creates a new Semaphore when _LLM_SEMAPHORE is None."""
+        import asyncio
+        import llm_sdlc_workflow.agents.base_agent as bm
+
+        original = bm._LLM_SEMAPHORE
+        try:
+            bm._LLM_SEMAPHORE = None
+            s = bm._get_semaphore()
+            assert isinstance(s, asyncio.Semaphore)
+            # Second call returns same object
+            s2 = bm._get_semaphore()
+            assert s is s2
+        finally:
+            bm._LLM_SEMAPHORE = original
+
+
+# ─── _query_and_parse and _query_and_parse_chunked error paths ────────────────
+
+
+class TestQueryAndParseErrorPaths:
+    async def test_query_and_parse_reraises_on_bad_json(self, tmp_path):
+        """_query_and_parse raises when model construction fails."""
+        from llm_sdlc_workflow.models.artifacts import DiscoveryArtifact
+        agent = BaseAgent(name="err", artifacts_dir=str(tmp_path))
+        # Return JSON that is technically valid but missing required fields
+        with patch.object(agent, "_run_with_retry", new=AsyncMock(return_value='{"garbage": true}')):
+            with pytest.raises(Exception):
+                await agent._query_and_parse("sys", "user", DiscoveryArtifact)
+
+    async def test_query_and_parse_chunked_reraises_when_model_init_fails(self, tmp_path):
+        """_query_and_parse_chunked except block fires when model(**data) raises."""
+        from llm_sdlc_workflow.models.artifacts import EngineeringArtifact
+        agent = BaseAgent(name="err", artifacts_dir=str(tmp_path))
+
+        # Plan response has enough to parse JSON but model(**data) fails because
+        # we patch model_class to raise
+        good_plan_json = '{"generated_files": [], "backend_tech": null, "frontend_tech": null, "review_iteration": 1}'
+        agent._run_with_retry = AsyncMock(return_value=good_plan_json)
+
+        with patch("asyncio.sleep", new=AsyncMock()):
+            # Patch EngineeringArtifact to raise on construction
+            with patch.object(EngineeringArtifact, "__init__", side_effect=ValueError("bad")):
+                with pytest.raises(Exception):
+                    await agent._query_and_parse_chunked(
+                        system="sys",
+                        plan_message="plan",
+                        file_keys=["generated_files"],
+                        model_class=EngineeringArtifact,
+                    )
+
+
+# ─── _compact edge cases ──────────────────────────────────────────────────────
+
+
+class TestCompactEdgeCases:
+    def test_compact_with_dict_field(self):
+        """_compact handles dict-valued fields (environment_variables)."""
+        from llm_sdlc_workflow.models.artifacts import InfrastructureArtifact, IaCFile
+        agent = BaseAgent(name="cmp", artifacts_dir="/tmp")
+        artifact = InfrastructureArtifact(
+            iac_files=[IaCFile(path="Dockerfile", content="FROM python:3.11", purpose="app")],
+            primary_service_port=8080,
+            environment_variables={"DB_URL": "postgres://db/app", "SECRET": "abc"},
+        )
+        result = agent._compact(artifact)
+        assert "InfrastructureArtifact" in result
+        assert "DB_URL" in result
+
+    def test_compact_with_empty_dict_shows_empty(self):
+        """_compact shows '(empty)' for an empty dict field."""
+        from llm_sdlc_workflow.models.artifacts import InfrastructureArtifact
+        agent = BaseAgent(name="cmp", artifacts_dir="/tmp")
+        artifact = InfrastructureArtifact(
+            iac_files=[],
+            primary_service_port=8080,
+            environment_variables={},
+        )
+        result = agent._compact(artifact)
+        assert "(empty)" in result
+
+    def test_compact_with_iac_files_shows_paths(self):
+        """_compact lists iac_files paths without full content."""
+        from llm_sdlc_workflow.models.artifacts import InfrastructureArtifact, IaCFile
+        agent = BaseAgent(name="cmp", artifacts_dir="/tmp")
+        artifact = InfrastructureArtifact(
+            iac_files=[
+                IaCFile(path="Dockerfile", content="FROM python:3.11\nRUN pip install flask", purpose="App container"),
+                IaCFile(path="docker-compose.yml", content="version: '3.8'", purpose="Compose"),
+            ],
+            primary_service_port=8080,
+        )
+        result = agent._compact(artifact)
+        assert "Dockerfile" in result
+
+    def test_compact_with_decisions_shows_key_decisions(self):
+        """_compact shows 'Key Decisions' section when decisions list is populated."""
+        from llm_sdlc_workflow.models.artifacts import DiscoveryArtifact, DecisionRecord
+        agent = BaseAgent(name="cmp", artifacts_dir="/tmp")
+        artifact = DiscoveryArtifact(
+            raw_requirements="Build API",
+            requirements=["Auth"],
+            user_goals=["Speed"],
+            constraints=["PostgreSQL"],
+            success_criteria=["200ms"],
+            key_features=["JWT"],
+            domain_context="API",
+            scope="backend",
+            decisions=[
+                DecisionRecord(decision="Use JWT", rationale="Stateless"),
+                DecisionRecord(decision="Use PostgreSQL", rationale="ACID"),
+            ],
+        )
+        result = agent._compact(artifact)
+        assert "Key Decisions" in result
+        assert "Use JWT" in result

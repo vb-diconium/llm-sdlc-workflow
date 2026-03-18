@@ -413,3 +413,83 @@ class TestSaveReport:
         p._save_report(result)
         report = json.loads((tmp_path / "00_pipeline_report.json").read_text())
         assert "Something went wrong" in report["errors"]
+
+
+# ─── print_summary ─────────────────────────────────────────────────────────────
+
+
+class TestPrintSummary:
+    """Tests for Pipeline.print_summary() — the Rich console table renderer."""
+
+    def _full_result(self) -> PipelineResult:
+        """Build a PipelineResult with all stages populated."""
+        result = PipelineResult(
+            requirements="Build full stack app",
+            started_at="2026-01-01T00:00:00",
+            completed_at="2026-01-01T00:10:00",
+        )
+        result.intent = _make_discovery()
+        result.architecture = MagicMock(
+            components=[MagicMock(), MagicMock()],
+            architecture_style="Microservices",
+        )
+        result.generated_spec = _make_spec()
+        result.engineering = _make_engineering()
+        result.infra_plan = _make_infra("plan")
+        result.infra_apply = _make_infra("apply")
+        result.infra_apply.container_running = True
+        result.infra_apply.base_url = "http://localhost:8080"
+        result.infra_apply.iac_files = [
+            IaCFile(path="Dockerfile", content="FROM python:3.11", purpose="app"),
+        ]
+        result.review_iterations = [_make_review(passed=True, iteration=1)]
+        result.test_architecture = _make_testing_artifact("architecture", passed=True)
+        result.test_infrastructure = _make_testing_artifact("infrastructure", passed=True)
+        result.test_review = _make_testing_artifact("review", passed=True)
+        return result
+
+    def test_print_summary_runs_without_error(self, tmp_path):
+        """print_summary should not raise for a fully-populated result."""
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = self._full_result()
+        p.print_summary(result)  # must not raise
+
+    def test_print_summary_with_minimal_result(self, tmp_path):
+        """print_summary handles a result with only requirements set."""
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        p.print_summary(result)  # must not raise
+
+    def test_print_summary_with_failed_result(self, tmp_path):
+        """print_summary shows FAILED banner when result.passed is False."""
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = self._full_result()
+        # Make one testing stage fail
+        result.test_review = _make_testing_artifact("review", passed=False)
+        result.errors.append("Test failure")
+        p.print_summary(result)  # must not raise
+
+    def test_print_summary_with_review_iterations(self, tmp_path):
+        """print_summary renders all review iterations in the table."""
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        result.review_iterations = [
+            _make_review(passed=False, iteration=1),
+            _make_review(passed=True, iteration=2),
+        ]
+        p.print_summary(result)  # must not raise
+
+    def test_print_summary_infrastructure_not_running(self, tmp_path):
+        """print_summary shows 'not running' when container is not running."""
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        result.infra_plan = _make_infra("plan")
+        result.infra_plan.container_running = False
+        p.print_summary(result)  # must not raise
+
+    def test_print_summary_with_errors(self, tmp_path):
+        """print_summary renders error panel when result.errors is non-empty."""
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        result.errors = ["LLM rate limit", "Docker timeout"]
+        p.print_summary(result)  # must not raise
