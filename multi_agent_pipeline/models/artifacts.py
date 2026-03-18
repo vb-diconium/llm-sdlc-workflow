@@ -35,9 +35,14 @@ class DecisionRecord(BaseModel):
 
     decision: str
     rationale: str
-    alternatives_considered: List[str]
+    alternatives_considered: List[str] = []
     trade_offs: List[str] = []
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+    @field_validator("alternatives_considered", "trade_offs", mode="before")
+    @classmethod
+    def _coerce(cls, v: Any) -> List[str]:
+        return _coerce_str_list(v)
 
 
 # ─── Spec Artifact (optional user-provided technical specs) ──────────────────
@@ -183,6 +188,14 @@ class EngineeringArtifact(BaseModel):
     review_iteration: int = 1
     review_feedback_applied: List[str] = []
 
+    @field_validator(
+        "api_endpoints", "data_models", "spec_compliance_notes", "review_feedback_applied",
+        mode="before",
+    )
+    @classmethod
+    def _coerce(cls, v: Any) -> List[str]:
+        return _coerce_str_list(v)
+
 
 class ServiceArtifact(BaseModel):
     """Output of one engineering sub-agent: Backend, BFF, or Frontend."""
@@ -198,6 +211,14 @@ class ServiceArtifact(BaseModel):
     decisions: List[DecisionRecord] = []
     review_iteration: int = 1
     review_feedback_applied: List[str] = []
+
+    @field_validator(
+        "api_endpoints", "data_models", "spec_compliance_notes", "review_feedback_applied",
+        mode="before",
+    )
+    @classmethod
+    def _coerce(cls, v: Any) -> List[str]:
+        return _coerce_str_list(v)
 
 
 # Resolve forward reference
@@ -226,6 +247,14 @@ class InfrastructureArtifact(BaseModel):
     decisions: List[DecisionRecord] = []
     review_iteration: int = 1
     review_feedback_applied: List[str] = []
+
+    @field_validator(
+        "service_dependencies", "build_notes", "spec_compliance_notes", "review_feedback_applied",
+        mode="before",
+    )
+    @classmethod
+    def _coerce(cls, v: Any) -> List[str]:
+        return _coerce_str_list(v)
 
     # Runtime fields — populated by the pipeline after the container starts (not from LLM)
     base_url: Optional[str] = None
