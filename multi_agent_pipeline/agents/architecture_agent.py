@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from models.artifacts import ArchitectureArtifact, IntentArtifact, SpecArtifact
+from models.artifacts import ArchitectureArtifact, DiscoveryArtifact, SpecArtifact
 from .base_agent import BaseAgent, load_prompt
 
 SYSTEM_PROMPT = load_prompt("architecture_agent.md")
@@ -18,7 +18,7 @@ class ArchitectureAgent(BaseAgent):
         super().__init__(name="Architecture Agent", artifacts_dir=artifacts_dir)
 
     async def run(
-        self, intent: IntentArtifact, spec: Optional[SpecArtifact] = None
+        self, intent: DiscoveryArtifact, spec: Optional[SpecArtifact] = None
     ) -> ArchitectureArtifact:
         spec_section = ""
         if spec:

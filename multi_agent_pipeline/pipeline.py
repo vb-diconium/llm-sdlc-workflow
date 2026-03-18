@@ -285,13 +285,14 @@ class Pipeline:
             if result.review:
                 _crit = result.review.critical_issues
                 _high = result.review.high_issues
+                _review_status = "✅ Passed" if result.review.passed else "⚠️  Did not fully pass"
                 await self._await_human(
                     checkpoint="Checkpoint 4 — Security & Quality Review",
                     details=[
                         f"Review score     : {result.review.overall_score}/100",
                         f"Critical issues  : {len(_crit)}",
                         f"High issues      : {len(_high)}",
-                        f"Status           : {'\u2705 Passed' if result.review.passed else '⚠️  Did not fully pass'}",
+                        f"Status           : {_review_status}",
                         *(["", "Critical issues:", *[f"  ⚠ {i[:100]}" for i in _crit[:4]]] if _crit else []),
                     ],
                     artifact_path=os.path.join(self.artifacts_dir, "04_review_artifact.json"),

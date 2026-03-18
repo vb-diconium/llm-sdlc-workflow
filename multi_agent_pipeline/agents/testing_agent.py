@@ -1,7 +1,7 @@
 """
 Testing Agent — verifies the application at each pipeline stage.
 
-IMPORTANT: The Testing Agent ONLY uses IntentArtifact to derive test cases.
+IMPORTANT: The Testing Agent ONLY uses DiscoveryArtifact to derive test cases.
 It does NOT receive SpecArtifact — specs are an implementation concern for
 Architecture and Engineering; testing must validate against user intent only.
 
@@ -21,7 +21,7 @@ from models.artifacts import (
     ArchitectureArtifact,
     EngineeringArtifact,
     InfrastructureArtifact,
-    IntentArtifact,
+    DiscoveryArtifact,
     ReviewArtifact,
     TestingArtifact,
 )
@@ -37,7 +37,7 @@ class TestingAgent(BaseAgent):
     async def run(
         self,
         stage: str,
-        intent: IntentArtifact,
+        intent: DiscoveryArtifact,
         architecture: Optional[ArchitectureArtifact] = None,
         engineering: Optional[EngineeringArtifact] = None,
         infrastructure: Optional[InfrastructureArtifact] = None,
