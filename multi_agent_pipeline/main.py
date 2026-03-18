@@ -112,6 +112,14 @@ Examples:
             "EXTENDS the existing contract instead of starting from scratch."
         )
     )
+    parser.add_argument(
+        "--auto", action="store_true",
+        help=(
+            "Skip all human review checkpoints and run the pipeline end-to-end without "
+            "pausing. Useful for CI/CD or when you trust the output and want a fully "
+            "unattended run. Human checkpoints are ENABLED by default."
+        )
+    )
     return parser.parse_args()
 
 
@@ -299,15 +307,17 @@ def get_requirements(args: argparse.Namespace) -> str:
 async def async_main(args: argparse.Namespace, requirements: str, spec, existing_spec) -> int:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     artifacts_dir = args.output_dir or os.path.join("artifacts", f"run_{timestamp}")
+    human_checkpoints = not getattr(args, "auto", False)
 
     console.print(Panel(
         f"[bold]Requirements preview:[/bold]\n{requirements[:300]}"
         f"{'...' if len(requirements) > 300 else ''}\n\n"
-        f"[dim]Artifacts → {artifacts_dir}[/dim]",
+        f"[dim]Artifacts → {artifacts_dir}[/dim]\n"
+        f"[dim]Human checkpoints: {'enabled (4 review pauses)' if human_checkpoints else 'disabled (--auto)'}[/dim]",
         title="Starting Pipeline",
     ))
 
-    pipeline = Pipeline(artifacts_dir=artifacts_dir)
+    pipeline = Pipeline(artifacts_dir=artifacts_dir, human_checkpoints=human_checkpoints)
     result = await pipeline.run(requirements, spec=spec, existing_spec=existing_spec)
     pipeline.print_summary(result)
     return 0 if result.passed else 1

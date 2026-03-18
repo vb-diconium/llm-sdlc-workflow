@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import List, Optional
@@ -91,8 +92,9 @@ class PipelineResult:
 
 
 class Pipeline:
-    def __init__(self, artifacts_dir: str = "./artifacts"):
+    def __init__(self, artifacts_dir: str = "./artifacts", human_checkpoints: bool = True):
         self.artifacts_dir = artifacts_dir
+        self.human_checkpoints = human_checkpoints
         os.makedirs(artifacts_dir, exist_ok=True)
         self.discovery_agent = DiscoveryAgent(artifacts_dir)
         self.architecture_agent = ArchitectureAgent(artifacts_dir)
@@ -129,7 +131,21 @@ class Pipeline:
             self._step_header("Step 1", "Discovery Agent", "Analysing requirements, goals, constraints and risks")
             result.intent = await self.discovery_agent.run(requirements)
             self._step_done("Discovery", len(result.intent.requirements), "requirements extracted")
-
+            await self._await_human(
+                checkpoint="Checkpoint 1 — Requirements Validated",
+                details=[
+                    f"Requirements extracted : {len(result.intent.requirements)}",
+                    f"Goals identified       : {len(result.intent.user_goals)}",
+                    f"Constraints            : {len(result.intent.constraints)}",
+                    f"Risks surfaced         : {len(result.intent.risks)}",
+                    f"Scope                  : {result.intent.scope[:120]}{'...' if len(result.intent.scope) > 120 else ''}",
+                    "",
+                    "Top requirements:",
+                    *[f"  · {r[:100]}" for r in result.intent.requirements[:4]],
+                ],
+                artifact_path=os.path.join(self.artifacts_dir, "01_discovery_artifact.json"),
+                edit_hint="If requirements were misunderstood, update your requirements file and restart.",
+            )
             # ── Step 2: Architecture ────────────────────────────────────────
             self._step_header("Step 2", "Architecture Agent", "Designing system architecture")
             result.architecture = await self.architecture_agent.run(result.intent, spec)
@@ -144,6 +160,26 @@ class Pipeline:
             )
             self._testing_status("Architecture", result.test_architecture)
 
+            _arch_passed = sum(1 for t in result.test_architecture.test_cases if t.status == "passed")
+            _arch_total  = len(result.test_architecture.test_cases)
+            await self._await_human(
+                checkpoint="Checkpoint 2 — Architecture Approved",
+                details=[
+                    f"Architecture style : {result.architecture.architecture_style}",
+                    f"Components         : {len(result.architecture.components)}",
+                    f"Architecture tests : {_arch_passed}/{_arch_total} passed, "
+                        f"{len(result.test_architecture.blocking_issues)} blocking",
+                    "",
+                    "Components:",
+                    *[f"  · {c.name}: {c.responsibility[:80]}" for c in result.architecture.components[:5]],
+                ],
+                artifact_path=os.path.join(self.artifacts_dir, "02_architecture_artifact.json"),
+                edit_hint=(
+                    "To override technology or design choices, restart with "
+                    "--arch-constraints or --tech-constraints flags."
+                ),
+            )
+
             # ── Step 4: Spec Agent — forward contract ───────────────────────
             self._step_header("Step 4", "Spec Agent", "Generating forward contract (OpenAPI + DDL)")
             result.generated_spec = await self.spec_agent.run(
@@ -156,6 +192,27 @@ class Pipeline:
             self._step_done(
                 "Spec", len(result.generated_spec.generated_spec_files),
                 f"spec files — services: [{services}]  ports: {ports}"
+            )
+
+            _spec_dir = os.path.join(self.artifacts_dir, "generated", "specs")
+            _openapi_lines = len((result.generated_spec.openapi_spec or "").splitlines())
+            _schema_lines  = len((result.generated_spec.database_schema or "").splitlines())
+            _shared = ", ".join(result.generated_spec.shared_models[:6]) or "none"
+            await self._await_human(
+                checkpoint="Checkpoint 3 — API Contract Approved  [MOST CRITICAL]",
+                details=[
+                    f"Services      : {', '.join(result.generated_spec.monorepo_services)}",
+                    f"Ports         : {ports}",
+                    f"OpenAPI spec  : {_openapi_lines} lines  →  {_spec_dir}/openapi.yaml",
+                    f"SQL schema    : {_schema_lines} lines  →  {_spec_dir}/schema.sql",
+                    f"Shared models : {_shared}",
+                ],
+                artifact_path=os.path.join(self.artifacts_dir, "04_generated_spec_artifact.json"),
+                edit_hint=(
+                    "This is the public contract. Edit openapi.yaml + schema.sql freely.\n"
+                    "  Engineering will implement exactly what is in those files.\n"
+                    "  Once downstream teams depend on these paths, changes are expensive."
+                ),
             )
 
             # ── Step 5: Engineering + Infrastructure in PARALLEL ────────────
@@ -224,6 +281,25 @@ class Pipeline:
                         "Continuing with best effort.[/red]\n"
                     )
 
+            if result.review:
+                _crit = result.review.critical_issues
+                _high = result.review.high_issues
+                await self._await_human(
+                    checkpoint="Checkpoint 4 — Security & Quality Review",
+                    details=[
+                        f"Review score     : {result.review.overall_score}/100",
+                        f"Critical issues  : {len(_crit)}",
+                        f"High issues      : {len(_high)}",
+                        f"Status           : {'\u2705 Passed' if result.review.passed else '⚠️  Did not fully pass'}",
+                        *(["", "Critical issues:", *[f"  ⚠ {i[:100]}" for i in _crit[:4]]] if _crit else []),
+                    ],
+                    artifact_path=os.path.join(self.artifacts_dir, "04_review_artifact.json"),
+                    edit_hint=(
+                        "Abort here and add org-specific security constraints via "
+                        "--arch-constraints, then re-run with --from-run."
+                    ) if _crit else None,
+                )
+
             # ── Step 7: Start containers + live testing ─────────────────────
             self._step_header("Step 7", "Infrastructure Agent", "Building and starting containers")
             result.infrastructure = await self.infrastructure_agent.run(
@@ -280,6 +356,54 @@ class Pipeline:
         return result
 
     # ─── Display helpers ─────────────────────────────────────────────────────
+
+    async def _await_human(
+        self,
+        checkpoint: str,
+        details: list,
+        artifact_path: str,
+        edit_hint: Optional[str] = None,
+    ) -> None:
+        """Pause the pipeline and wait for human review.
+
+        Skipped automatically when:
+          - human_checkpoints=False  (--auto flag)
+          - stdin is not a TTY      (CI/CD / piped input)
+        """
+        if not self.human_checkpoints or not sys.stdin.isatty():
+            return
+
+        body = "\n".join(f"  {d}" for d in details)
+        hint_block = (
+            f"\n\n  [dim]💡 {edit_hint.replace(chr(10), chr(10) + '  ')}[/dim]"
+            if edit_hint else ""
+        )
+        console.print(Panel(
+            f"[bold yellow]⏸  Pipeline paused — human review required[/bold yellow]\n\n"
+            f"{body}"
+            f"{hint_block}\n\n"
+            f"  [dim]Artifact → {artifact_path}[/dim]\n\n"
+            f"  [bold]↵ Enter[/bold] — proceed    "
+            f"[bold]s[/bold] — skip checkpoint    "
+            f"[bold]a[/bold] — abort pipeline",
+            title=f"[bold yellow]🔍 {checkpoint}[/bold yellow]",
+            border_style="yellow",
+        ))
+
+        try:
+            response = await asyncio.to_thread(input, "  ▶ ")
+            response = response.strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[red]⛔ Pipeline aborted.[/red]")
+            raise SystemExit(0)
+
+        if response in ("a", "abort"):
+            console.print("[red]⛔ Pipeline aborted by user at checkpoint.[/red]")
+            raise SystemExit(0)
+        elif response in ("s", "skip"):
+            console.print("[dim]  ↩ Checkpoint skipped.[/dim]\n")
+        else:
+            console.print("[green]  ▶ Continuing pipeline…[/green]\n")
 
     def _step_header(self, step: str, agent: str, description: str) -> None:
         console.print(Panel(

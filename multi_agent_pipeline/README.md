@@ -119,119 +119,119 @@ Runs on **GitHub Models** via your **GitHub Copilot licence** — no separate AP
 
 ## Human Intelligence Checkpoints
 
-The pipeline is fully automated, but these are the natural **human-in-the-loop** checkpoints where human review adds the most value:
+The pipeline **automatically pauses** at 4 checkpoints by default. At each pause it prints a summary panel and waits for your input before continuing. No `Ctrl+C` needed.
+
+```
+⏸  Pipeline paused — human review required
+
+  Requirements extracted : 12
+  Goals identified       : 5
+  ...
+
+  💡 If requirements were misunderstood, update your file and restart.
+
+  Artifact → artifacts/my_run/01_discovery_artifact.json
+
+  ↵ Enter — proceed    s — skip checkpoint    a — abort pipeline
+  ▶ _
+```
 
 | # | Checkpoint | After Agent | Why Human Input Matters |
 |---|---|---|---|
-| 1 | **Requirements Validation** | Discovery Agent | Confirm the agent correctly interpreted ambiguous requirements; add tacit domain knowledge the LLM can't know |
-| 2 | **Architecture Sign-off** | Architecture Agent | Review strategic technology choices and trade-offs against team expertise, org constraints, and existing systems |
-| 3 | **API Contract Approval** | Spec Agent | The OpenAPI + DDL is a **public contract** — once downstream services depend on it, changes are expensive |
-| 4 | **Security Review** | Review Agent | LLMs miss context-specific threat models, business-logic exploits, and organisation-specific compliance requirements |
-| 5 | **Infrastructure Cost Check** | Infrastructure Agent | Review resource sizing, cloud costs, and network topology before committing to production infrastructure |
-| 6 | **User Acceptance Testing** | Testing Agent (Stage 3) | Does the generated system actually solve the original business problem from a user perspective? |
-| 7 | **Incremental Contract Approval** | Spec Agent (--from-run) | Before extending a live API contract, a human must confirm which additions are backwards-compatible |
+| 1 | **Requirements Validated** | Discovery Agent | Confirm the agent correctly interpreted ambiguous requirements; add tacit domain knowledge the LLM can't know |
+| 2 | **Architecture Approved** | Architecture Agent + Test | Review strategic technology choices and trade-offs against team expertise, org constraints, and existing systems |
+| 3 | **API Contract Approved** ⚠️ | Spec Agent | The OpenAPI + DDL is a **public contract** — once downstream services depend on it, changes are expensive |
+| 4 | **Security & Quality Review** | Review Agent | LLMs miss context-specific threat models, business-logic exploits, and organisation-specific compliance requirements |
 
-> **Future:** The pipeline will emit a `HUMAN_CHECKPOINT` event at each of these stages so a CI/CD system can pause and request review via GitHub PR comment, Slack message, or JIRA ticket.
+> **CI/CD / unattended mode:** pass `--auto` to skip all checkpoints and run end-to-end without any pauses. Checkpoints are also auto-skipped when stdin is not a TTY (piped input, Docker, GitHub Actions).
 
-### Stopping the Pipeline for Human Review
+### Commands at each checkpoint
 
-The pipeline runs end-to-end by default. To pause at a checkpoint, use `Ctrl+C` at any time — the run directory and all artifacts written so far are preserved on disk.
+| Input | Action |
+|---|---|
+| `↵ Enter` (or any text) | Proceed to the next pipeline step |
+| `s` | Skip this checkpoint and continue (don't pause here) |
+| `a` or `abort` | Stop the pipeline immediately — all artifacts written so far are preserved |
 
-```
-artifacts/run_20260318_120000/
-├── 01_discovery_artifact.json     ← safe to stop after this
-├── 02_architecture_artifact.json  ← safe to stop after this
-├── 04_generated_spec_artifact.json  ← contract lives here — most important checkpoint
-└── generated/specs/
-    ├── openapi.yaml               ← review and edit this before continuing
-    └── schema.sql                 ← review and edit this before continuing
-```
+### Checkpoint 1 — Requirements Validated
 
-### Checkpoint 1 — After Discovery (requirements validation)
+The pipeline pauses after the Discovery Agent and shows you what it understood: requirements, goals, constraints, scope, and top risks.
 
-Let the Discovery Agent run, then stop and inspect its output:
-
+**If the agent missed something or misunderstood scope:**
 ```bash
-# Run Discovery only by interrupting immediately after step 1
-python3.11 main.py --requirements reqs.txt --output-dir ./artifacts/my_run
-# └─ Ctrl+C after you see: "✅ Discovery complete"
-
-# Read what the agent understood
-cat artifacts/my_run/01_discovery_artifact.json | python3 -m json.tool | less
-```
-
-If the agent missed requirements or misunderstood scope, update your requirements file, then restart:
-
-```bash
-# Edit requirements to correct misunderstandings
+# Type 'a' to abort, then edit your requirements file
 vim reqs.txt
 
-# Restart from scratch with the corrected requirements
+# Restart with corrected requirements
 python3.11 main.py --requirements reqs.txt --output-dir ./artifacts/my_run_v2
 ```
 
-### Checkpoint 2 — After Architecture (design sign-off)
-
+**Inspect the full artifact at any time:**
 ```bash
-python3.11 main.py --requirements reqs.txt --output-dir ./artifacts/my_run
-# └─ Ctrl+C after: "✅ Architecture complete"
-
-cat artifacts/my_run/02_architecture_artifact.json | python3 -m json.tool | less
+cat artifacts/my_run/01_discovery_artifact.json | python3 -m json.tool | less
 ```
 
-To override architecture decisions, encode them as constraints and restart:
+### Checkpoint 2 — Architecture Approved
 
+The pipeline pauses after Architecture design and the first testing pass. Shows architecture style, component names, and test results.
+
+**To override technology or design decisions:**
 ```bash
+# Type 'a' to abort, then restart with constraints
 python3.11 main.py \
   --requirements reqs.txt \
-  --arch-constraints "Use event-sourcing with Kafka, no REST between services" \
+  --arch-constraints "Event-sourcing with Kafka, no synchronous REST between services" \
   --tech-constraints "Kotlin + Ktor, not Spring Boot" \
   --output-dir ./artifacts/my_run_v2
 ```
 
-### Checkpoint 3 — After Spec Agent (API contract approval) — most critical
+### Checkpoint 3 — API Contract Approved ⚠️ Most critical
 
-The forward contract is the most important human gate. Once downstream teams start coding against it, changes are expensive.
+The pipeline pauses after the Spec Agent and shows the OpenAPI + DDL it generated, with direct file paths.
+
+**This is the most important gate.** Once Engineering runs, all three services (BE, BFF, FE) implement against this contract. Edit the files freely at the prompt before pressing Enter:
 
 ```bash
-python3.11 main.py --requirements reqs.txt --output-dir ./artifacts/my_run
-# └─ Ctrl+C after: "✅ Spec complete"
+# While the pipeline is paused at Checkpoint 3:
+vim artifacts/my_run/generated/specs/openapi.yaml   # add/remove/rename endpoints
+vim artifacts/my_run/generated/specs/schema.sql     # adjust tables and columns
 
-# Review the generated contract
-cat artifacts/my_run/generated/specs/openapi.yaml
-cat artifacts/my_run/generated/specs/schema.sql
+# Then press Enter at the prompt — Engineering implements your edited contract exactly
 ```
 
-**Edit the spec files directly** to add, remove, or rename endpoints/tables, then resume by passing the edited run as the base:
-
+**Alternatively, abort and re-run with the edited contract as the base:**
 ```bash
-# After editing generated/specs/openapi.yaml and schema.sql:
+# Type 'a' to abort, edit the spec files, then resume
 python3.11 main.py \
   --requirements reqs.txt \
   --from-run ./artifacts/my_run \
   --output-dir ./artifacts/my_run_approved
 ```
 
-The Spec Agent will treat your edited files as the approved contract and Engineering will implement exactly what you specified.
+The Spec Agent will mark all edited paths as the approved contract with `x-existing: true`.
 
-### Checkpoint 4 — After Review Agent (security sign-off)
+### Checkpoint 4 — Security & Quality Review
 
+The pipeline pauses after the review loop and shows the security score, critical issue count, and a list of any blocking findings.
+
+**If there are critical issues you need to handle yourself:**
 ```bash
-python3.11 main.py --requirements reqs.txt --output-dir ./artifacts/my_run
-# └─ Ctrl+C after review loop completes
-
-# Read the security audit
-cat artifacts/my_run/04_review_artifact.json | python3 -m json.tool | grep -A5 'critical_issues'
-```
-
-If you have organisation-specific security findings to inject, add them as architecture constraints and re-run engineering only by starting a new run that extends the same spec contract:
-
-```bash
+# Type 'a' to abort, then re-run with security constraints injected
 python3.11 main.py \
   --requirements reqs.txt \
   --from-run ./artifacts/my_run \
-  --arch-constraints "All endpoints require mutual TLS; secrets must use AWS Secrets Manager" \
+  --arch-constraints "All endpoints require mutual TLS; secrets via AWS Secrets Manager only" \
   --output-dir ./artifacts/my_run_secure
+```
+
+### Running without checkpoints (CI/CD)
+
+```bash
+# Skip all human review pauses — runs fully unattended
+python3.11 main.py --requirements reqs.txt --auto
+
+# Checkpoints are also automatically skipped when stdin is not a TTY:
+# e.g. piped input, Docker containers, GitHub Actions, etc.
 ```
 
 ### Checkpoint 5 — Incremental feature development (chain of runs)
