@@ -30,6 +30,19 @@ from rich.rule import Rule
 # Prompts directory: <repo_root>/prompts/
 _PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "..", "prompts")
 
+# Semaphore capping concurrent GitHub Models API calls.
+# GitHub Models free tier: UserConcurrentRequests = 2 per 0 s.
+# Lazily initialised so it's always created inside the running event loop.
+_LLM_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """Return the module-level semaphore, creating it on first call."""
+    global _LLM_SEMAPHORE
+    if _LLM_SEMAPHORE is None:
+        _LLM_SEMAPHORE = asyncio.Semaphore(2)
+    return _LLM_SEMAPHORE
+
 
 def load_prompt(filename: str) -> str:
     """Load a system prompt from the prompts/ directory."""
@@ -185,6 +198,8 @@ class BaseAgent:
                             file_list[i]["content"] = f"# TODO: generate {path}\n"
                         else:
                             await asyncio.sleep(RETRY_DELAY)
+                # Small pause between fill calls to spread burst traffic.
+                await asyncio.sleep(0.5)
 
             data[key] = file_list
 
@@ -211,17 +226,23 @@ class BaseAgent:
         raise last_err  # type: ignore
 
     async def _raw_query(self, system: str, user_message: str) -> str:
-        """Single call to the GitHub Models API with json_object output."""
+        """Single call to the GitHub Models API with json_object output.
+
+        Protected by a module-level asyncio.Semaphore(2) so that at most two
+        concurrent LLM calls are ever in flight across all agents, keeping the
+        pipeline within the GitHub Models free-tier concurrency limit.
+        """
         client = _make_client()
-        response = await client.chat.completions.create(
-            model=_DEFAULT_MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user_message},
-            ],
-            max_tokens=16384,
-            response_format={"type": "json_object"},
-        )
+        async with _get_semaphore():
+            response = await client.chat.completions.create(
+                model=_DEFAULT_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user",   "content": user_message},
+                ],
+                max_tokens=16384,
+                response_format={"type": "json_object"},
+            )
         return response.choices[0].message.content or ""
 
     # ─── Context formatting ──────────────────────────────────────────────────

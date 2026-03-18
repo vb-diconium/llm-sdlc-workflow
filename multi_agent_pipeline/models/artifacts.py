@@ -63,7 +63,7 @@ class SpecArtifact(BaseModel):
     source_files: List[str] = []            # paths to spec files that were loaded
 
 
-# ─── Intent Agent ───────────────────────────────────────────────────────────
+# ─── Discovery Agent ───────────────────────────────────────────────────────────
 
 
 class DiscoveryArtifact(BaseModel):
@@ -256,6 +256,9 @@ class InfrastructureArtifact(BaseModel):
     def _coerce(cls, v: Any) -> List[str]:
         return _coerce_str_list(v)
 
+    # Deployment phase — set by InfrastructureAgent, never from LLM output
+    phase: str = "plan"   # "plan" (skip_start=True) | "apply" (containers started)
+
     # Runtime fields — populated by the pipeline after the container starts (not from LLM)
     base_url: Optional[str] = None
     container_running: bool = False
@@ -335,6 +338,7 @@ class TestingArtifact(BaseModel):
     findings: List[str]
     blocking_issues: List[str]
     passed: bool
+    failed_services: List[str] = []  # service names with failures (infrastructure stage)
     recommendations: List[str]
     decisions: List[DecisionRecord] = []
 

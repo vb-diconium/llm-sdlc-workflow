@@ -27,7 +27,7 @@ class BackendAgent(BaseAgent):
 
         plan_message = f"""Plan and list every file for the backend/ service.
 
-## Intent
+## Discovery
 {self._compact(intent)}
 
 ## Architecture

@@ -27,7 +27,7 @@ class BffAgent(BaseAgent):
 
         plan_message = f"""Plan and list every file for the bff/ service.
 
-## Intent
+## Discovery
 {self._compact(intent)}
 
 ## Architecture

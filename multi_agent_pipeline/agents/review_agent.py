@@ -49,7 +49,7 @@ class ReviewAgent(BaseAgent):
 
         user_message = f"""Review iteration {iteration}.
 
-## Intent Summary
+## Discovery Summary
 {self._compact(intent)}
 
 ## Architecture Summary

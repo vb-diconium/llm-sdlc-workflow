@@ -66,7 +66,7 @@ class InfrastructureAgent(BaseAgent):
 
         plan_message = f"""Generate Infrastructure as Code to containerise this application.
 
-## Intent Summary
+## Discovery Summary
 {self._compact(intent)}
 
 ## Architecture Summary
@@ -110,6 +110,9 @@ This is a json response."""
                 list(review_feedback.critical_issues) + list(review_feedback.high_issues)
             )
 
+        # Tag the artifact with its deployment phase (Fix 4)
+        artifact.phase = "plan" if skip_start else "apply"
+
         # Write IaC files alongside the generated source code
         generated_dir = os.path.join(self.artifacts_dir, self.generated_dir_name)
         self._write_iac_files(artifact, generated_dir)
@@ -117,7 +120,13 @@ This is a json response."""
         if not skip_start:
             artifact = await self.start_service(artifact)
 
-        self.save_artifact(artifact, "06_infrastructure_artifact.json")
+        # Phase-named artifact files so plan and apply are never overwritten
+        filename = (
+            "06a_infrastructure_plan_artifact.json"
+            if artifact.phase == "plan"
+            else "06b_infrastructure_apply_artifact.json"
+        )
+        self.save_artifact(artifact, filename)
         self.save_history()
         return artifact
 

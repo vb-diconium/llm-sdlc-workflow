@@ -54,7 +54,7 @@ class SpecAgent(BaseAgent):
 
         plan_message = f"""Derive formal specifications from intent and architecture.
 
-## Intent Summary
+## Discovery Summary
 {self._compact(intent)}
 
 ## Architecture Summary

@@ -27,7 +27,7 @@ class FrontendAgent(BaseAgent):
 
         plan_message = f"""Plan and list every file for the frontend/ service.
 
-## Intent
+## Discovery
 {self._compact(intent)}
 
 ## Architecture

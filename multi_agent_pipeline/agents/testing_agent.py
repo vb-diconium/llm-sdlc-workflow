@@ -20,6 +20,7 @@ from typing import Optional
 from models.artifacts import (
     ArchitectureArtifact,
     EngineeringArtifact,
+    GeneratedSpecArtifact,
     InfrastructureArtifact,
     DiscoveryArtifact,
     ReviewArtifact,
@@ -42,14 +43,17 @@ class TestingAgent(BaseAgent):
         engineering: Optional[EngineeringArtifact] = None,
         infrastructure: Optional[InfrastructureArtifact] = None,
         review: Optional[ReviewArtifact] = None,
+        generated_spec: Optional[GeneratedSpecArtifact] = None,
     ) -> TestingArtifact:
         if stage not in ("architecture", "infrastructure", "review"):
             raise ValueError(f"Invalid stage: {stage!r}")
 
-        context = f"## Intent (source of truth for all test cases)\n{self._compact(intent)}"
+        context = f"## Discovery (source of truth for all test cases)\n{self._compact(intent)}"
 
         if architecture:
             context += f"\n\n## Architecture (what was designed)\n{self._compact(architecture)}"
+        if generated_spec:
+            context += f"\n\n## Forward Contract / Spec\n{self._compact(generated_spec)}"
         if engineering:
             context += f"\n\n## Engineering (what was built)\n{self._compact(engineering)}"
         if infrastructure:
@@ -68,7 +72,7 @@ class TestingAgent(BaseAgent):
             stage_instruction = (
                 f"The application is LIVE and running at {base_url}. "
                 "Generate http_test_cases with real, executable HTTP requests for every "
-                "functional requirement from the Intent. "
+                "functional requirement from the Discovery. "
                 "Also generate cypress_spec_files (TypeScript .cy.ts) covering every user journey. "
                 "cypress_spec_files baseUrl should match: " + base_url
             )
@@ -76,7 +80,7 @@ class TestingAgent(BaseAgent):
             stage_instruction = {
                 "architecture": (
                     "Verify the Architecture satisfies ALL requirements and success criteria "
-                    "from the Intent. Flag any requirement the architecture ignores or contradicts."
+                    "from the Discovery. Flag any requirement the architecture ignores or contradicts."
                 ),
                 "review": (
                     "Final verification: does the full system — intent + architecture + "
@@ -91,7 +95,7 @@ class TestingAgent(BaseAgent):
 
 {context}
 
-Test cases must be derived from the Intent's requirements and success criteria.
+Test cases must be derived from the Discovery's requirements and success criteria.
 Respond ONLY with the JSON object."""
 
         artifact = await self._query_and_parse(

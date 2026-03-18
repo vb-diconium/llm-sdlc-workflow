@@ -4,17 +4,20 @@ Pipeline Orchestrator — coordinates all agents.
 Flow:
   1. DiscoveryAgent       → DiscoveryArtifact
   2. ArchitectureAgent    → ArchitectureArtifact
-  3. TestingAgent         → TestingArtifact (stage: architecture)
-  4. SpecAgent             → GeneratedSpecArtifact (forward contract: OpenAPI + DDL)
+  3. SpecAgent             → GeneratedSpecArtifact (forward contract: OpenAPI + DDL)
+  4. TestingAgent         → TestingArtifact (stage: architecture+spec)
   5. EngineeringAgent  ┐
-     InfrastructureAgent ┘  ← run in PARALLEL (asyncio.gather)
+     InfrastructureAgent ┘  ← run in PARALLEL (asyncio.gather)  [infra plan only]
   6. ReviewAgent          → ReviewArtifact (loop up to MAX_REVIEW_ITERATIONS)
      ↳ if not passed → EngineeringAgent.apply_review_feedback
                       + InfrastructureAgent.apply_review_feedback (parallel)
      ↳ repeat until passed or max iterations reached
-  7. TestingAgent         → TestingArtifact (stage: infrastructure)
-     — live HTTP tests against running container
-     — Cypress spec generation + optional run
+     ↳ raises PipelineHaltError if still failing after max iterations
+  7. InfrastructureAgent  → InfrastructureArtifact (infra apply: start containers)
+  7b. TestingAgent        → TestingArtifact (stage: infrastructure)
+      — live HTTP tests against running container
+      — Cypress spec generation + optional run
+      — retry loop (max 2) for failed_services
   8. TestingAgent         → TestingArtifact (stage: review)  ← final sign-off
 """
 
@@ -55,6 +58,11 @@ from models.artifacts import (
 console = Console()
 
 MAX_REVIEW_ITERATIONS = 3
+MAX_INFRA_TEST_RETRIES = 2   # max re-runs of failed services after Stage 2 testing
+
+
+class PipelineHaltError(Exception):
+    """Raised when the pipeline cannot continue due to unresolved failures."""
 
 
 @dataclass
@@ -68,7 +76,8 @@ class PipelineResult:
     architecture: Optional[ArchitectureArtifact] = None
     generated_spec: Optional[GeneratedSpecArtifact] = None
     engineering: Optional[EngineeringArtifact] = None
-    infrastructure: Optional[InfrastructureArtifact] = None
+    infra_plan: Optional[InfrastructureArtifact] = None    # Step 5 — IaC plan (no containers)
+    infra_apply: Optional[InfrastructureArtifact] = None   # Step 7 — containers started
     review_iterations: List[ReviewArtifact] = field(default_factory=list)
 
     test_architecture: Optional[TestingArtifact] = None
@@ -80,6 +89,11 @@ class PipelineResult:
     @property
     def review(self) -> Optional[ReviewArtifact]:
         return self.review_iterations[-1] if self.review_iterations else None
+
+    @property
+    def infrastructure(self) -> Optional[InfrastructureArtifact]:
+        """Most recent infra artifact — apply phase if available, else plan."""
+        return self.infra_apply or self.infra_plan
 
     @property
     def passed(self) -> bool:
@@ -119,7 +133,7 @@ class Pipeline:
 
         console.print(Panel(
             "[bold]🚀 Multi-Agent Pipeline Starting[/bold]\n\n"
-            "Intent → Architecture → [Test] → Spec → "
+            "Discovery → Architecture → [Test] → Spec → "
             "[Engineering ‖ Infrastructure] → "
             "Review loop (max " + str(MAX_REVIEW_ITERATIONS) + ") → "
             "[Live Test + Cypress] → [Final Test]",
@@ -128,7 +142,7 @@ class Pipeline:
         ))
 
         try:
-            # ── Step 1: Intent ──────────────────────────────────────────────
+            # ── Step 1: Discovery ──────────────────────────────────────────────
             self._step_header("Step 1", "Discovery Agent", "Analysing requirements, goals, constraints and risks")
             result.intent = await self.discovery_agent.run(requirements)
             self._step_done("Discovery", len(result.intent.requirements), "requirements extracted")
@@ -152,37 +166,8 @@ class Pipeline:
             result.architecture = await self.architecture_agent.run(result.intent, spec)
             self._step_done("Architecture", len(result.architecture.components), "components designed")
 
-            # ── Step 3: Testing — architecture stage ────────────────────────
-            self._step_header("Step 3", "Testing Agent", "Verifying architecture vs requirements")
-            result.test_architecture = await self.testing_agent.run(
-                stage="architecture",
-                intent=result.intent,
-                architecture=result.architecture,
-            )
-            self._testing_status("Architecture", result.test_architecture)
-
-            _arch_passed = sum(1 for t in result.test_architecture.test_cases if t.status == "passed")
-            _arch_total  = len(result.test_architecture.test_cases)
-            await self._await_human(
-                checkpoint="Checkpoint 2 — Architecture Approved",
-                details=[
-                    f"Architecture style : {result.architecture.architecture_style}",
-                    f"Components         : {len(result.architecture.components)}",
-                    f"Architecture tests : {_arch_passed}/{_arch_total} passed, "
-                        f"{len(result.test_architecture.blocking_issues)} blocking",
-                    "",
-                    "Components:",
-                    *[f"  · {c.name}: {c.responsibility[:80]}" for c in result.architecture.components[:5]],
-                ],
-                artifact_path=os.path.join(self.artifacts_dir, "02_architecture_artifact.json"),
-                edit_hint=(
-                    "To override technology or design choices, restart with "
-                    "--arch-constraints or --tech-constraints flags."
-                ),
-            )
-
-            # ── Step 4: Spec Agent — forward contract ───────────────────────
-            self._step_header("Step 4", "Spec Agent", "Generating forward contract (OpenAPI + DDL)")
+            # ── Step 3: Spec Agent — forward contract ───────────────────────
+            self._step_header("Step 3", "Spec Agent", "Generating forward contract (OpenAPI + DDL)")
             result.generated_spec = await self.spec_agent.run(
                 result.intent, result.architecture, existing_spec
             )
@@ -200,13 +185,15 @@ class Pipeline:
             _schema_lines  = len((result.generated_spec.database_schema or "").splitlines())
             _shared = ", ".join(result.generated_spec.shared_models[:6]) or "none"
             await self._await_human(
-                checkpoint="Checkpoint 3 — API Contract Approved  [MOST CRITICAL]",
+                checkpoint="Checkpoint 2 — Architecture & API Contract Approved  [MOST CRITICAL]",
                 details=[
-                    f"Services      : {', '.join(result.generated_spec.monorepo_services)}",
-                    f"Ports         : {ports}",
-                    f"OpenAPI spec  : {_openapi_lines} lines  →  {_spec_dir}/openapi.yaml",
-                    f"SQL schema    : {_schema_lines} lines  →  {_spec_dir}/schema.sql",
-                    f"Shared models : {_shared}",
+                    f"Architecture style : {result.architecture.architecture_style}",
+                    f"Components         : {len(result.architecture.components)}",
+                    f"Services           : {', '.join(result.generated_spec.monorepo_services)}",
+                    f"Ports              : {ports}",
+                    f"OpenAPI spec       : {_openapi_lines} lines  →  {_spec_dir}/openapi.yaml",
+                    f"SQL schema         : {_schema_lines} lines  →  {_spec_dir}/schema.sql",
+                    f"Shared models      : {_shared}",
                 ],
                 artifact_path=os.path.join(self.artifacts_dir, "04_generated_spec_artifact.json"),
                 edit_hint=(
@@ -216,12 +203,22 @@ class Pipeline:
                 ),
             )
 
-            # ── Step 5: Engineering + Infrastructure in PARALLEL ────────────
+            # ── Step 4: Testing — architecture + spec validation ─────────────
+            self._step_header("Step 4", "Testing Agent", "Verifying architecture + spec vs requirements")
+            result.test_architecture = await self.testing_agent.run(
+                stage="architecture",
+                intent=result.intent,
+                architecture=result.architecture,
+                generated_spec=result.generated_spec,
+            )
+            self._testing_status("Architecture + Spec", result.test_architecture)
+
+            # ── Step 5: Engineering + Infrastructure plan in PARALLEL ───────
             self._step_header(
                 "Step 5", "Engineering + Infrastructure",
                 "Generating code and IaC in parallel (Kotlin/React + Docker)"
             )
-            result.engineering, result.infrastructure = await asyncio.gather(
+            result.engineering, result.infra_plan = await asyncio.gather(
                 self.engineering_agent.run(result.intent, result.architecture, result.generated_spec),
                 self.infrastructure_agent.run(
                     result.intent, result.architecture,
@@ -231,7 +228,7 @@ class Pipeline:
             )
             self._step_done("Engineering", len(result.engineering.generated_files), "files generated")
             self._step_done(
-                "Infrastructure", len(result.infrastructure.iac_files),
+                "Infrastructure (plan)", len(result.infra_plan.iac_files),
                 "IaC files written (containers start after review loop)"
             )
 
@@ -246,7 +243,7 @@ class Pipeline:
                     intent=result.intent,
                     architecture=result.architecture,
                     engineering=result.engineering,
-                    infrastructure=result.infrastructure,
+                    infrastructure=result.infra_plan,
                     iteration=iteration,
                     previous_feedback=previous_feedback,
                 )
@@ -265,14 +262,14 @@ class Pipeline:
                         f"(iteration {iteration + 1}/{MAX_REVIEW_ITERATIONS})…[/yellow]"
                     )
                     # Apply feedback to both agents in parallel
-                    result.engineering, result.infrastructure = await asyncio.gather(
+                    result.engineering, result.infra_plan = await asyncio.gather(
                         self.engineering_agent.apply_review_feedback(
                             result.intent, result.architecture,
                             result.engineering, review, result.generated_spec
                         ),
                         self.infrastructure_agent.apply_review_feedback(
                             result.intent, result.architecture,
-                            result.engineering, result.infrastructure, review
+                            result.engineering, result.infra_plan, review
                         ),
                     )
                     previous_feedback = review
@@ -281,6 +278,14 @@ class Pipeline:
                         f"[red]⚠ Max review iterations ({MAX_REVIEW_ITERATIONS}) reached. "
                         "Continuing with best effort.[/red]\n"
                     )
+
+            # Halt if review still failing after max iterations
+            if result.review and not result.review.passed:
+                crit = result.review.critical_issues
+                raise PipelineHaltError(
+                    f"Review failed after {MAX_REVIEW_ITERATIONS} iteration(s). "
+                    f"Unresolved critical issues: {crit or '[none flagged]'}"
+                )
 
             if result.review:
                 _crit = result.review.critical_issues
@@ -295,7 +300,7 @@ class Pipeline:
                         f"Status           : {_review_status}",
                         *(["", "Critical issues:", *[f"  ⚠ {i[:100]}" for i in _crit[:4]]] if _crit else []),
                     ],
-                    artifact_path=os.path.join(self.artifacts_dir, "04_review_artifact.json"),
+                    artifact_path=os.path.join(self.artifacts_dir, "05_review_artifact.json"),
                     edit_hint=(
                         "Abort here and add org-specific security constraints via "
                         "--arch-constraints, then re-run with --from-run."
@@ -304,21 +309,21 @@ class Pipeline:
 
             # ── Step 7: Start containers + live testing ─────────────────────
             self._step_header("Step 7", "Infrastructure Agent", "Building and starting containers")
-            result.infrastructure = await self.infrastructure_agent.run(
+            result.infra_apply = await self.infrastructure_agent.run(
                 intent=result.intent,
                 architecture=result.architecture,
                 engineering=result.engineering,
             )
-            if result.infrastructure.container_running:
+            if result.infra_apply.container_running:
                 self._step_done(
-                    "Infrastructure",
-                    len(result.infrastructure.iac_files),
-                    f"service live at {result.infrastructure.base_url}",
+                    "Infrastructure (apply)",
+                    len(result.infra_apply.iac_files),
+                    f"service live at {result.infra_apply.base_url}",
                 )
             else:
                 self._step_done(
-                    "Infrastructure",
-                    len(result.infrastructure.iac_files),
+                    "Infrastructure (apply)",
+                    len(result.infra_apply.iac_files),
                     "IaC files written (container not running — live tests skipped)",
                 )
 
@@ -331,9 +336,47 @@ class Pipeline:
                 intent=result.intent,
                 architecture=result.architecture,
                 engineering=result.engineering,
-                infrastructure=result.infrastructure,
+                infrastructure=result.infra_apply,
             )
             self._testing_status("Infrastructure (live + Cypress)", result.test_infrastructure)
+
+            # ── Stage-2 retry loop for failed services ───────────────────────
+            for _retry in range(1, MAX_INFRA_TEST_RETRIES + 1):
+                if result.test_infrastructure.passed:
+                    break
+                failed_svcs = result.test_infrastructure.failed_services
+                if not failed_svcs:
+                    break   # no specific services to target — don't retry blindly
+                console.print(
+                    f"[yellow]🔄 Stage-2 retry {_retry}/{MAX_INFRA_TEST_RETRIES} — "
+                    f"re-generating failed services: {failed_svcs}…[/yellow]"
+                )
+                result.engineering = await self.engineering_agent.run(
+                    result.intent, result.architecture, result.generated_spec,
+                    iteration=result.engineering.review_iteration + 1,
+                )
+                result.infra_apply = await self.infrastructure_agent.run(
+                    intent=result.intent,
+                    architecture=result.architecture,
+                    engineering=result.engineering,
+                )
+                result.test_infrastructure = await self.testing_agent.run(
+                    stage="infrastructure",
+                    intent=result.intent,
+                    architecture=result.architecture,
+                    engineering=result.engineering,
+                    infrastructure=result.infra_apply,
+                )
+                self._testing_status(
+                    f"Infrastructure retry {_retry} (live + Cypress)",
+                    result.test_infrastructure,
+                )
+            else:
+                if not result.test_infrastructure.passed:
+                    raise PipelineHaltError(
+                        f"Infrastructure tests still failing after {MAX_INFRA_TEST_RETRIES} "
+                        f"retries. Blocking: {result.test_infrastructure.blocking_issues}"
+                    )
 
             # ── Step 8: Final testing ────────────────────────────────────────
             self._step_header("Step 8", "Testing Agent", "Final verification")
