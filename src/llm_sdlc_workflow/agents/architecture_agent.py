@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from models.artifacts import ArchitectureArtifact, DiscoveryArtifact, SpecArtifact
+from llm_sdlc_workflow.models.artifacts import ArchitectureArtifact, DiscoveryArtifact, SpecArtifact
 from .base_agent import BaseAgent, load_prompt
 
 SYSTEM_PROMPT = load_prompt("architecture_agent.md")

@@ -1,0 +1,55 @@
+name: Run LLM SDLC Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      requirements:
+        description: "Path to requirements file (relative to repo root)"
+        required: true
+        default: "examples/hello_world_requirements.txt"
+      project_name:
+        description: "Generated project name"
+        required: false
+        default: "generated"
+      model:
+        description: "LLM model name (e.g. gpt-4o, gpt-4o-mini)"
+        required: false
+        default: "gpt-4o-mini"
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run pipeline
+        env:
+          # For GitHub Models (default): GITHUB_TOKEN is provided automatically.
+          # For other providers, add PIPELINE_API_KEY as a repository secret and
+          # set PIPELINE_BASE_URL as a repository variable.
+          GITHUB_TOKEN:      ${{ secrets.GITHUB_TOKEN }}
+          PIPELINE_API_KEY:  ${{ secrets.PIPELINE_API_KEY }}
+          PIPELINE_BASE_URL: ${{ vars.PIPELINE_BASE_URL }}
+          PIPELINE_MODEL:    ${{ vars.PIPELINE_MODEL || github.event.inputs.model }}
+        run: |
+          python main.py \
+            --requirements "${{ github.event.inputs.requirements }}" \
+            --project-name "${{ github.event.inputs.project_name }}" \
+            --model "${{ github.event.inputs.model }}" \
+            --auto
+
+      - name: Upload pipeline artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-run-${{ github.run_number }}
+          path: artifacts/
+          retention-days: 30

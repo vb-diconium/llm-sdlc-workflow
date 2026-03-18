@@ -36,7 +36,7 @@ from pydantic import BaseModel
 from rich.console import Console
 from rich.rule import Rule
 
-# Prompts directory: <repo_root>/prompts/
+# Prompts directory: src/llm_sdlc_workflow/prompts/
 _PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "..", "prompts")
 
 # Semaphore capping concurrent GitHub Models API calls.

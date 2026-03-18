@@ -14,7 +14,7 @@ Responsibilities:
 
 from __future__ import annotations
 
-from models.artifacts import DiscoveryArtifact
+from llm_sdlc_workflow.models.artifacts import DiscoveryArtifact
 from .base_agent import BaseAgent, load_prompt
 
 SYSTEM_PROMPT = load_prompt("discovery_agent.md")

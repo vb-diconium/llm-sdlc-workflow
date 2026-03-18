@@ -42,8 +42,8 @@ import anyio
 from rich.console import Console
 from rich.panel import Panel
 
-from models.artifacts import SpecArtifact
-from pipeline import Pipeline
+from llm_sdlc_workflow.models.artifacts import SpecArtifact
+from llm_sdlc_workflow.pipeline import Pipeline
 
 console = Console()
 

@@ -20,7 +20,7 @@ from typing import Optional
 
 from rich.console import Console
 
-from models.artifacts import (
+from llm_sdlc_workflow.models.artifacts import (
     ArchitectureArtifact,
     EngineeringArtifact,
     InfrastructureArtifact,

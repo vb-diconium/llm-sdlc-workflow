@@ -315,10 +315,17 @@ Keep one `pipeline.yaml` per project — each file is completely self-contained.
 **Prerequisites:** Python 3.11+, Docker, GitHub account with a Copilot licence, GitHub CLI (`gh`).
 
 ```bash
-git clone https://github.com/vb-diconium/llm-sdlc-workflow.git
+git clone https://github.com/vb-nattamai/llm-sdlc-workflow.git
 cd llm-sdlc-workflow
-pip install -r requirements.txt
+
+# Install the package and all dependencies (editable mode — recommended for development)
+pip install -e .
+
+# Or install with dev dependencies (pytest etc.)
+pip install -e ".[dev]"
 ```
+
+> The package is installed from `src/` using [PEP 517 src layout](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/). `main.py` at the repo root stays as a convenient CLI entry point, or you can use `python -m llm_sdlc_workflow` once installed.
 
 ### Authentication
 
@@ -486,7 +493,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - run: pip install -r requirements.txt
+      - run: pip install -e ".[dev]"
 
       - name: Run pipeline
         env:
@@ -783,36 +790,56 @@ The `generated/specs/` directory is what `--from-run` reads on the next run.
 ## Project Structure
 
 ```
-llm_sdlc_workflow/
-├── main.py                     # CLI entry point — all flags including --from-run
-├── pipeline.py                 # 8-step orchestrator
-├── pipeline.yaml               # project config template — copy and edit per project
-├── requirements.txt
-├── prompts/                    # agent system prompts — edit without touching Python
-│   ├── discovery_agent.md      # requirements analyst + product manager persona
-│   ├── architecture_agent.md
-│   ├── spec_agent.md           # forward contract: OpenAPI + DDL
-│   ├── backend_agent.md        # Kotlin Spring Boot 3.3 persona
-│   ├── bff_agent.md            # Kotlin Spring WebFlux persona
-│   ├── frontend_agent.md       # React 18 + TypeScript 5 persona
-│   ├── infrastructure_agent.md
-│   ├── review_agent.md
-│   └── testing_agent.md
-├── agents/
-│   ├── base_agent.py           # shared: GitHub Models query, retry, chunked gen, I/O
-│   ├── discovery_agent.py      # DiscoveryAgent → DiscoveryArtifact
-│   ├── architecture_agent.py
-│   ├── spec_agent.py           # forward contract generator
-│   ├── engineering_agent.py    # orchestrator → runs BE + BFF + FE in parallel
-│   ├── backend_agent.py
-│   ├── bff_agent.py
-│   ├── frontend_agent.py
-│   ├── infrastructure_agent.py
-│   ├── review_agent.py
-│   └── testing_agent.py
-└── models/
-    ├── artifacts.py            # all Pydantic models: DiscoveryArtifact, GeneratedSpecArtifact, etc.
-    └── __init__.py
+llm-sdlc-workflow/                        ← repo root
+├── main.py                               # CLI entry point (python main.py ...)
+├── pyproject.toml                        # package metadata + dependencies (PEP 517)
+├── pipeline.yaml                         # pipeline config template — copy per project
+├── README.md
+├── .gitignore
+│
+├── src/
+│   └── llm_sdlc_workflow/               # installable Python package
+│       ├── __init__.py                  # package version
+│       ├── __main__.py                  # python -m llm_sdlc_workflow entry point
+│       ├── pipeline.py                  # 8-step orchestrator
+│       │
+│       ├── agents/                      # one file per AI agent
+│       │   ├── base_agent.py            # shared: LLM client, retry, chunked gen, I/O
+│       │   ├── discovery_agent.py       # DiscoveryAgent   → DiscoveryArtifact
+│       │   ├── architecture_agent.py    # ArchitectureAgent → ArchitectureArtifact
+│       │   ├── spec_agent.py            # SpecAgent        → GeneratedSpecArtifact
+│       │   ├── engineering_agent.py     # EngineeringAgent → orchestrates BE+BFF+FE
+│       │   ├── backend_agent.py         # Kotlin Spring Boot 3.3
+│       │   ├── bff_agent.py             # Kotlin Spring WebFlux
+│       │   ├── frontend_agent.py        # React 18 + TypeScript 5
+│       │   ├── infrastructure_agent.py  # Dockerfiles + docker-compose
+│       │   ├── review_agent.py          # OWASP security + code quality loop
+│       │   └── testing_agent.py         # 3-stage: arch → live HTTP → final
+│       │
+│       ├── models/
+│       │   └── artifacts.py             # all Pydantic models (typed inter-agent data)
+│       │
+│       └── prompts/                     # agent system prompts — edit without touching Python
+│           ├── discovery_agent.md
+│           ├── architecture_agent.md
+│           ├── spec_agent.md
+│           ├── backend_agent.md
+│           ├── bff_agent.md
+│           ├── frontend_agent.md
+│           ├── infrastructure_agent.md
+│           ├── review_agent.md
+│           └── testing_agent.md
+│
+├── tests/                               # pytest test suite
+│   ├── test_artifacts.py
+│   └── test_pipeline.py
+│
+├── examples/
+│   └── hello_world_requirements.txt     # minimal 3-tier app example
+│
+└── .github/
+    └── workflows/
+        └── pipeline.yml                 # GitHub Actions — run pipeline via workflow_dispatch
 ```
 
 ---
@@ -864,4 +891,4 @@ The JSON schema at the bottom of each prompt file defines the artifact structure
 - GitHub CLI (`gh`) authenticated with a GitHub Copilot licence
 - Docker (Docker Desktop or Docker Engine) — for the Infrastructure Agent to build and start containers
 - Node.js 18+ + `npx` — optional, only needed for running Cypress e2e tests locally
-- Python packages: `openai`, `pydantic`, `rich`, `anyio`, `httpx`, `pyyaml`
+- Python packages: managed via `pyproject.toml` — install with `pip install -e .`

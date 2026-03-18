@@ -12,7 +12,7 @@ check .passed and pass .critical_issues / .high_issues back to agents.
 
 from __future__ import annotations
 
-from models.artifacts import (
+from llm_sdlc_workflow.models.artifacts import (
     ArchitectureArtifact,
     EngineeringArtifact,
     InfrastructureArtifact,

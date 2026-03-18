@@ -1,18 +1,18 @@
-"""Backend sub-agent — generates the backend/ service in the monorepo."""
+"""BFF sub-agent — generates the bff/ service in the monorepo."""
 from __future__ import annotations
 from typing import Optional
-from models.artifacts import (
+from llm_sdlc_workflow.models.artifacts import (
     ArchitectureArtifact, EngineeringArtifact, GeneratedSpecArtifact,
     DiscoveryArtifact, ReviewFeedback,
 )
 from .base_agent import BaseAgent, load_prompt
 
-SYSTEM_PROMPT = load_prompt("backend_agent.md")
+SYSTEM_PROMPT = load_prompt("bff_agent.md")
 
 
-class BackendAgent(BaseAgent):
+class BffAgent(BaseAgent):
     def __init__(self, artifacts_dir: str = "./artifacts", generated_dir_name: str = "generated"):
-        super().__init__(name="Backend Agent", artifacts_dir=artifacts_dir, generated_dir_name=generated_dir_name)
+        super().__init__(name="BFF Agent", artifacts_dir=artifacts_dir, generated_dir_name=generated_dir_name)
 
     async def run(
         self,
@@ -25,7 +25,7 @@ class BackendAgent(BaseAgent):
         spec_section = self._build_contract_section(contract)
         feedback_section = self._build_feedback_section(review_feedback)
 
-        plan_message = f"""Plan and list every file for the backend/ service.
+        plan_message = f"""Plan and list every file for the bff/ service.
 
 ## Discovery
 {self._compact(intent)}
@@ -37,11 +37,11 @@ class BackendAgent(BaseAgent):
 Return JSON with every file's content = \"__PENDING__\". Valid json."""
 
         fill_tmpl = (
-            "Write COMPLETE, RUNNABLE Kotlin/Spring Boot content for: {path}\n"
+            "Write COMPLETE, RUNNABLE Kotlin/Spring WebFlux content for: {path}\n"
             "Purpose: {purpose}\n"
-            "Service: backend (port 8081, internal)\n"
+            "Service: bff (port 8080, calls backend:8081)\n"
             "Architecture: {arch_style}\n"
-            "Endpoints: {endpoints_summary}\n\n"
+            "BFF endpoints: {endpoints_summary}\n\n"
             "Return JSON: {{\"content\": \"<full file>\"}}\n"
             "No TODOs. Valid json."
         )
@@ -57,11 +57,11 @@ Return JSON with every file's content = \"__PENDING__\". Valid json."""
                 "endpoints_summary": "; ".join(contract.openapi_spec[:200].splitlines()[:5]) if contract.openapi_spec else "see architecture",
             },
         )
-        artifact.service_name = "backend"
+        artifact.service_name = "bff"
         artifact.review_iteration = iteration
         if review_feedback:
             artifact.review_feedback_applied = list(review_feedback.critical_issues) + list(review_feedback.high_issues)
-        self.save_artifact(artifact, "03a_backend_artifact.json")
+        self.save_artifact(artifact, "03b_bff_artifact.json")
         self._write_service_files(artifact)
         self.save_history()
         return artifact
@@ -69,9 +69,7 @@ Return JSON with every file's content = \"__PENDING__\". Valid json."""
     def _build_contract_section(self, contract: GeneratedSpecArtifact) -> str:
         parts = ["\n\n## Contract (source of truth — implement exactly)"]
         if contract.openapi_spec:
-            parts.append(f"### OpenAPI spec (BE endpoints)\n```yaml\n{contract.openapi_spec[:4000]}\n```")
-        if contract.database_schema:
-            parts.append(f"### SQL DDL\n```sql\n{contract.database_schema[:3000]}\n```")
+            parts.append(f"### OpenAPI spec\n```yaml\n{contract.openapi_spec[:4000]}\n```")
         if contract.tech_stack_constraints:
             parts.append(f"### Tech constraints\n{contract.tech_stack_constraints}")
         if contract.architecture_constraints:

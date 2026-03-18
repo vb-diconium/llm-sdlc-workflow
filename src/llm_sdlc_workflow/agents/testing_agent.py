@@ -17,7 +17,7 @@ import os
 import shutil
 from typing import Optional
 
-from models.artifacts import (
+from llm_sdlc_workflow.models.artifacts import (
     ArchitectureArtifact,
     EngineeringArtifact,
     GeneratedSpecArtifact,

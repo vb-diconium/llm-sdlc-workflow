@@ -35,7 +35,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from agents import (
+from llm_sdlc_workflow.agents import (
     ArchitectureAgent,
     DiscoveryAgent,
     EngineeringAgent,
@@ -44,7 +44,7 @@ from agents import (
     SpecAgent,
     TestingAgent,
 )
-from models.artifacts import (
+from llm_sdlc_workflow.models.artifacts import (
     ArchitectureArtifact,
     DiscoveryArtifact,
     EngineeringArtifact,

@@ -1,7 +1,7 @@
 """Frontend sub-agent — generates the frontend/ service in the monorepo."""
 from __future__ import annotations
 from typing import Optional
-from models.artifacts import (
+from llm_sdlc_workflow.models.artifacts import (
     ArchitectureArtifact, EngineeringArtifact, GeneratedSpecArtifact,
     DiscoveryArtifact, ReviewFeedback,
 )

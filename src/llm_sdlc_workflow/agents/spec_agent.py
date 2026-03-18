@@ -23,7 +23,7 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from models.artifacts import (
+from llm_sdlc_workflow.models.artifacts import (
     ArchitectureArtifact,
     GeneratedSpecArtifact,
     DiscoveryArtifact,
