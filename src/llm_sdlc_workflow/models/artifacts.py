@@ -30,6 +30,29 @@ def _coerce_str_list(v: Any) -> List[str]:
     ]
 
 
+def _coerce_env_vars(v: Any) -> Dict[str, str]:
+    """Coerce environment_variables to Dict[str, str].
+
+    The LLM sometimes returns each value as a dict with 'value'/'default'/'purpose'
+    sub-fields instead of a plain string.  Flatten to string so validation passes.
+    """
+    if not isinstance(v, dict):
+        return {}
+    result: Dict[str, str] = {}
+    for k, val in v.items():
+        if isinstance(val, str):
+            result[str(k)] = val
+        elif isinstance(val, dict):
+            # Try common keys the LLM uses for the actual value
+            result[str(k)] = str(
+                val.get("value") or val.get("default") or val.get("example")
+                or val.get("description") or val.get("purpose") or ""
+            )
+        else:
+            result[str(k)] = str(val) if val is not None else ""
+    return result
+
+
 class DecisionRecord(BaseModel):
     """Captures a single architectural or implementation decision with full rationale."""
 
@@ -196,6 +219,11 @@ class EngineeringArtifact(BaseModel):
     def _coerce(cls, v: Any) -> List[str]:
         return _coerce_str_list(v)
 
+    @field_validator("environment_variables", mode="before")
+    @classmethod
+    def _coerce_env(cls, v: Any) -> Dict[str, str]:
+        return _coerce_env_vars(v)
+
 
 class ServiceArtifact(BaseModel):
     """Output of one engineering sub-agent: Backend, BFF, or Frontend."""
@@ -219,6 +247,11 @@ class ServiceArtifact(BaseModel):
     @classmethod
     def _coerce(cls, v: Any) -> List[str]:
         return _coerce_str_list(v)
+
+    @field_validator("environment_variables", mode="before")
+    @classmethod
+    def _coerce_env(cls, v: Any) -> Dict[str, str]:
+        return _coerce_env_vars(v)
 
 
 # Resolve forward reference
@@ -255,6 +288,11 @@ class InfrastructureArtifact(BaseModel):
     @classmethod
     def _coerce(cls, v: Any) -> List[str]:
         return _coerce_str_list(v)
+
+    @field_validator("environment_variables", mode="before")
+    @classmethod
+    def _coerce_env(cls, v: Any) -> Dict[str, str]:
+        return _coerce_env_vars(v)
 
     # Deployment phase — set by InfrastructureAgent, never from LLM output
     phase: str = "plan"   # "plan" (skip_start=True) | "apply" (containers started)

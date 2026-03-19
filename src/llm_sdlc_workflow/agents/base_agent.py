@@ -214,8 +214,7 @@ class BaseAgent:
                 for attempt in range(1, MAX_RETRIES + 1):
                     try:
                         fill_raw = await self._raw_query(fill_system, fill_msg)
-                        fill_data = self._extract_json(fill_raw)
-                        content = fill_data.get("content", "")
+                        content = self._extract_content_field(fill_raw)
                         if content:
                             file_list[i]["content"] = content
                             break
@@ -260,15 +259,23 @@ class BaseAgent:
         pipeline within the GitHub Models free-tier concurrency limit.
         """
         client = _make_client()
+        # Anthropic's OpenAI-compat endpoint does not support json_object —
+        # only json_schema (or no response_format at all).  All our prompts
+        # already instruct the model to reply with a raw JSON block, so we
+        # can safely omit response_format for Anthropic and keep it for others.
+        _is_anthropic = "anthropic.com" in _BASE_URL
+        extra: dict = {} if _is_anthropic else {"response_format": {"type": "json_object"}}
+        # Re-read at call time so --model / PIPELINE_MODEL set after import takes effect
+        _model = os.getenv("PIPELINE_MODEL", _DEFAULT_MODEL)
         async with _get_semaphore():
             response = await client.chat.completions.create(
-                model=_DEFAULT_MODEL,
+                model=_model,
                 messages=[
                     {"role": "system", "content": system},
                     {"role": "user",   "content": user_message},
                 ],
                 max_tokens=16384,
-                response_format={"type": "json_object"},
+                **extra,
             )
         return response.choices[0].message.content or ""
 
@@ -363,6 +370,40 @@ class BaseAgent:
         return path
 
     # ─── Helpers ─────────────────────────────────────────────────────────────
+
+    def _extract_content_field(self, text: str) -> str:
+        """Extract the 'content' value from a single-key {"content": "..."} response.
+
+        Handles cases where the content contains backticks (Markdown code fences)
+        or backslash sequences (Kotlin/Java regex) that make json.loads fail.
+        Falls back to a regex that grabs everything between the first
+        '"content":' and the final closing quote before '}'.
+        """
+        # 1. Happy path — well-formed JSON
+        try:
+            data = self._extract_json(text)
+            if isinstance(data, dict) and "content" in data:
+                return data["content"]
+        except Exception:
+            pass
+
+        # 2. Strip outer ```json ... ``` fences if present
+        stripped = re.sub(r"^```(?:json)?\s*", "", text.strip(), flags=re.DOTALL)
+        stripped = re.sub(r"\s*```$", "", stripped, flags=re.DOTALL).strip()
+
+        # 3. Robust fallback: find "content": then grab everything up to the
+        #    last '"' before the closing '}' — tolerates backticks and
+        #    unescaped backslashes inside the value.
+        m = re.search(r'"content"\s*:\s*"(.*)"|"content"\s*:\s*\'(.*)\'',
+                      stripped, re.DOTALL)
+        if m:
+            raw = m.group(1) if m.group(1) is not None else m.group(2)
+            # Unescape only the JSON sequences Claude reliably emits
+            raw = raw.replace("\\n", "\n").replace("\\t", "\t")
+            raw = raw.replace('\\"', '"').replace("\\\\", "\\")
+            return raw
+
+        raise ValueError(f"Could not extract 'content' field: {text[:200]}")
 
     def _extract_json(self, text: str) -> Dict:
         m = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
