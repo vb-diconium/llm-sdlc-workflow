@@ -1,4 +1,4 @@
-"""Frontend sub-agent — generates the frontend/ service in the monorepo."""
+"""Mobile sub-agent — generates the mobile/ service in the monorepo."""
 from __future__ import annotations
 from typing import Optional
 from llm_sdlc_workflow.models.artifacts import (
@@ -7,22 +7,22 @@ from llm_sdlc_workflow.models.artifacts import (
 )
 from .base_agent import BaseAgent, load_prompt
 
-SYSTEM_PROMPT = load_prompt("frontend_agent.md")
-
-_FRONTEND_DEFAULT = "React 18 + TypeScript (Vite 5, Axios, ESLint)"
+SYSTEM_PROMPT = load_prompt("mobile_agent.md")
 
 
-class FrontendAgent(BaseAgent):
+class MobileAgent(BaseAgent):
     def __init__(
         self,
         artifacts_dir: str = "./artifacts",
         generated_dir_name: str = "generated",
-        framework: Optional[str] = None,
-        language: Optional[str] = None,
+        platform: str = "React Native",
     ):
-        super().__init__(name="Frontend Agent", artifacts_dir=artifacts_dir, generated_dir_name=generated_dir_name)
-        parts = [p for p in [framework, language] if p]
-        self.tech_hint = " / ".join(parts) if parts else _FRONTEND_DEFAULT
+        super().__init__(
+            name="Mobile Agent",
+            artifacts_dir=artifacts_dir,
+            generated_dir_name=generated_dir_name,
+        )
+        self.platform = platform
 
     async def run(
         self,
@@ -34,10 +34,11 @@ class FrontendAgent(BaseAgent):
     ) -> EngineeringArtifact:
         spec_section = self._build_contract_section(contract)
         feedback_section = self._build_feedback_section(review_feedback)
+        bff_url = self._bff_url(contract)
 
-        plan_message = f"""Plan and list every file for the frontend/ service.
+        plan_message = f"""Plan and list every file for the mobile/ service.
 
-Tech stack: {self.tech_hint}
+Platform: {self.platform}
 
 ## Discovery
 {self._compact(intent)}
@@ -46,17 +47,19 @@ Tech stack: {self.tech_hint}
 {self._compact(architecture)}
 {spec_section}{feedback_section}
 
-Return JSON with every file's content = "__PENDING__". Valid json."""
+Mobile app communicates with: {bff_url}
+
+Return JSON with every file's content = \"__PENDING__\". Valid json."""
 
         fill_tmpl = (
-            f"Write COMPLETE, RUNNABLE {self.tech_hint} content for: {{path}}\n"
+            f"Write COMPLETE, RUNNABLE {self.platform} content for: {{path}}\n"
             "Purpose: {purpose}\n"
-            "Service: frontend (Vite build → Nginx port 80 → host 3000)\n"
-            "BFF base URL proxied via Nginx: /api → http://bff:8080\n"
+            f"Service: mobile ({self.platform})\n"
+            f"API base URL env var: BFF_BASE_URL (points to {bff_url})\n"
             "Architecture: {arch_style}\n"
-            "API endpoints available: {endpoints_summary}\n\n"
+            "API endpoints: {endpoints_summary}\n\n"
             "Return JSON: {{\"content\": \"<full file>\"}}\n"
-            "No TODOs, no `any` types. Valid json."
+            "No TODOs. No placeholder stubs. Valid json."
         )
 
         artifact = await self._query_and_parse_chunked(
@@ -67,26 +70,38 @@ Return JSON with every file's content = "__PENDING__". Valid json."""
             fill_message_tmpl=fill_tmpl,
             fill_context={
                 "arch_style": getattr(architecture, "architecture_style", "monorepo"),
-                "endpoints_summary": "; ".join(contract.openapi_spec[:200].splitlines()[:5]) if contract.openapi_spec else "see architecture",
+                "endpoints_summary": "; ".join(
+                    contract.openapi_spec[:200].splitlines()[:5]
+                ) if contract.openapi_spec else "see architecture",
             },
         )
-        artifact.service_name = "frontend"
+        artifact.service_name = "mobile"
         artifact.review_iteration = iteration
         if review_feedback:
-            artifact.review_feedback_applied = list(review_feedback.critical_issues) + list(review_feedback.high_issues)
-        self.save_artifact(artifact, "03c_frontend_artifact.json")
+            artifact.review_feedback_applied = (
+                list(review_feedback.critical_issues) + list(review_feedback.high_issues)
+            )
+        self.save_artifact(artifact, "03d_mobile_artifact.json")
         self._write_service_files(artifact)
         self.save_history()
         return artifact
 
+    # ─── Helpers ─────────────────────────────────────────────────────────────
+
+    def _bff_url(self, contract: GeneratedSpecArtifact) -> str:
+        """Return the BFF base URL from the contract, or a sensible default."""
+        bff_port = contract.service_ports.get("bff") or contract.service_ports.get("backend") or 8080
+        return f"http://localhost:{bff_port}"
+
     def _build_contract_section(self, contract: GeneratedSpecArtifact) -> str:
-        parts = ["\n\n## Contract (source of truth)"]
+        parts = ["\n\n## Contract (source of truth — implement exactly)"]
         if contract.openapi_spec:
-            parts.append(f"### OpenAPI spec (BFF endpoints — what frontend calls)\n```yaml\n{contract.openapi_spec[:3000]}\n```")
+            parts.append(
+                f"### OpenAPI spec (relevant endpoints for mobile client)\n"
+                f"```yaml\n{contract.openapi_spec[:4000]}\n```"
+            )
         if contract.tech_stack_constraints:
             parts.append(f"### Tech constraints\n{contract.tech_stack_constraints}")
-        if contract.architecture_constraints:
-            parts.append(f"### Architecture constraints\n{contract.architecture_constraints}")
         return "\n\n".join(parts)
 
     def _build_feedback_section(self, feedback: Optional[ReviewFeedback]) -> str:
@@ -111,4 +126,4 @@ Return JSON with every file's content = "__PENDING__". Valid json."""
             os.makedirs(os.path.dirname(full), exist_ok=True)
             with open(full, "w") as fh:
                 fh.write(f.content)
-            con.print(f"[dim]  📄 {full}[/dim]")
+            con.print(f"[dim]  📱 {full}[/dim]")

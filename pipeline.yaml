@@ -15,6 +15,46 @@
 # Overridden by --output-dir on the CLI.
 # output_dir: ./artifacts
 
+# ─── Component Toggles ───────────────────────────────────────────────────────
+# Control which service sub-agents are enabled.
+# All components are ON by default. Set to false to disable.
+# Overridden by --no-bff, --no-frontend, --mobile on the CLI.
+components:
+  backend: true        # Always recommended. Set false to... why would you?
+  bff: true            # Backend-for-Frontend proxy layer. Set false for API-only projects.
+  frontend: true       # Web frontend. Set false for API-only or mobile-only projects.
+  mobile: false        # Mobile app (React Native by default). Set true to enable.
+
+# ─── Tech-Stack Preferences ──────────────────────────────────────────────────
+# Language and framework overrides for each sub-agent.
+# Leave null (or omit) to use each agent's built-in default.
+# Overridden by --backend-lang, --backend-framework, etc. on the CLI.
+#
+# Examples:
+#   backend_language: "Python"    backend_framework: "FastAPI"
+#   backend_language: "Go"        backend_framework: "Gin"
+#   backend_language: "Node.js"   backend_framework: "NestJS"
+#   frontend_framework: "Vue"     frontend_language: "TypeScript"
+#   frontend_framework: "Angular" frontend_language: "TypeScript"
+#   mobile_platform: "Flutter"
+#   mobile_platform: "iOS (Swift)"
+#   mobile_platform: "Android (Kotlin)"
+tech:
+  # Backend (default: Kotlin / Spring Boot 3)
+  backend_language: null      # e.g. "Python", "Go", "Node.js", "Java"
+  backend_framework: null     # e.g. "FastAPI", "Gin", "Express", "Spring Boot"
+
+  # BFF — Backend for Frontend (default: Kotlin / Spring WebFlux)
+  bff_language: null          # e.g. "Node.js", "Kotlin"
+  bff_framework: null         # e.g. "NestJS", "Spring WebFlux"
+
+  # Frontend (default: React 18 / TypeScript / Vite)
+  frontend_framework: null    # e.g. "Vue", "Angular", "Next.js", "Svelte"
+  frontend_language: null     # e.g. "TypeScript", "JavaScript"
+
+  # Mobile (only used when components.mobile = true)
+  mobile_platform: null       # e.g. "React Native", "Flutter", "iOS (Swift)", "Android (Kotlin)"
+
 # ─── Spec-Driven Development ─────────────────────────────────────────────────
 # These constraints are forwarded to the Architecture and Engineering agents.
 # The Testing Agent always derives test cases from requirements only — never specs.

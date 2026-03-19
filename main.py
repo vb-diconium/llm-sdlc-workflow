@@ -44,6 +44,7 @@ from rich.panel import Panel
 
 from llm_sdlc_workflow.models.artifacts import SpecArtifact
 from llm_sdlc_workflow.pipeline import Pipeline
+from llm_sdlc_workflow.config import PipelineConfig, ComponentConfig, TechConfig
 
 console = Console()
 
@@ -140,6 +141,52 @@ Examples:
             "Examples: gpt-4o, gpt-4o-mini, o3-mini"
         )
     )
+
+    # ── Component toggles ──────────────────────────────────────────────────
+    comp = parser.add_argument_group("component toggles")
+    comp.add_argument(
+        "--no-bff", action="store_true",
+        help="Disable the BFF sub-agent (useful for pure API or mobile-only projects)."
+    )
+    comp.add_argument(
+        "--no-frontend", action="store_true",
+        help="Disable the Frontend sub-agent (API-only or mobile project)."
+    )
+    comp.add_argument(
+        "--mobile", action="store_true",
+        help="Enable the Mobile sub-agent (React Native by default)."
+    )
+
+    # ── Tech-stack preferences ────────────────────────────────────────────
+    tech = parser.add_argument_group("tech-stack preferences")
+    tech.add_argument(
+        "--backend-lang", metavar="LANG",
+        help='Backend programming language, e.g. "Python", "Go", "Node.js". Default: Kotlin.'
+    )
+    tech.add_argument(
+        "--backend-framework", metavar="FRAMEWORK",
+        help='Backend framework, e.g. "FastAPI", "Gin", "Express". Default: Spring Boot.'
+    )
+    tech.add_argument(
+        "--bff-lang", metavar="LANG",
+        help='BFF programming language. Default: Kotlin.'
+    )
+    tech.add_argument(
+        "--bff-framework", metavar="FRAMEWORK",
+        help='BFF framework, e.g. "NestJS", "Spring WebFlux". Default: Spring WebFlux.'
+    )
+    tech.add_argument(
+        "--frontend-framework", metavar="FRAMEWORK",
+        help='Frontend framework, e.g. "Vue", "Angular", "Next.js". Default: React 18.'
+    )
+    tech.add_argument(
+        "--frontend-lang", metavar="LANG",
+        help='Frontend language, e.g. "TypeScript", "JavaScript". Default: TypeScript.'
+    )
+    tech.add_argument(
+        "--mobile-platform", metavar="PLATFORM",
+        help='Mobile platform, e.g. "React Native", "Flutter", "iOS (Swift)", "Android (Kotlin)". Default: React Native.'
+    )
     return parser.parse_args()
 
 
@@ -191,6 +238,32 @@ def _apply_config(args: argparse.Namespace) -> None:
                     p = os.path.join(config_dir, p)
                 resolved.append(p)
             args.spec_files = resolved
+
+    # components block — only apply if flag not already set by CLI
+    comp_cfg = cfg.get("components") or {}
+    if not args.no_bff and comp_cfg.get("bff") is False:
+        args.no_bff = True
+    if not args.no_frontend and comp_cfg.get("frontend") is False:
+        args.no_frontend = True
+    if not args.mobile and comp_cfg.get("mobile") is True:
+        args.mobile = True
+
+    # tech block
+    tech_cfg = cfg.get("tech") or {}
+    if not args.backend_lang and tech_cfg.get("backend_language"):
+        args.backend_lang = tech_cfg["backend_language"]
+    if not args.backend_framework and tech_cfg.get("backend_framework"):
+        args.backend_framework = tech_cfg["backend_framework"]
+    if not args.bff_lang and tech_cfg.get("bff_language"):
+        args.bff_lang = tech_cfg["bff_language"]
+    if not args.bff_framework and tech_cfg.get("bff_framework"):
+        args.bff_framework = tech_cfg["bff_framework"]
+    if not args.frontend_framework and tech_cfg.get("frontend_framework"):
+        args.frontend_framework = tech_cfg["frontend_framework"]
+    if not args.frontend_lang and tech_cfg.get("frontend_language"):
+        args.frontend_lang = tech_cfg["frontend_language"]
+    if not args.mobile_platform and tech_cfg.get("mobile_platform"):
+        args.mobile_platform = tech_cfg["mobile_platform"]
 
     console.print(f"[dim]Config loaded from {config_path}[/dim]")
 
@@ -370,6 +443,25 @@ async def async_main(args: argparse.Namespace, requirements: str, spec, existing
     human_checkpoints = not getattr(args, "auto", False)
     project_name = _resolve_project_name(args)
 
+    # Build pipeline configuration from CLI args
+    pipeline_config = PipelineConfig(
+        components=ComponentConfig(
+            backend=True,  # always enabled
+            bff=not getattr(args, "no_bff", False),
+            frontend=not getattr(args, "no_frontend", False),
+            mobile=getattr(args, "mobile", False),
+        ),
+        tech=TechConfig(
+            backend_language=getattr(args, "backend_lang", None),
+            backend_framework=getattr(args, "backend_framework", None),
+            bff_language=getattr(args, "bff_lang", None),
+            bff_framework=getattr(args, "bff_framework", None),
+            frontend_framework=getattr(args, "frontend_framework", None),
+            frontend_language=getattr(args, "frontend_lang", None),
+            mobile_platform=getattr(args, "mobile_platform", None),
+        ),
+    )
+
     # Thread model selection through the env var that base_agent.py reads
     os.environ["PIPELINE_MODEL"] = args.model
 
@@ -380,11 +472,17 @@ async def async_main(args: argparse.Namespace, requirements: str, spec, existing
         f"[dim]Generated code    : {artifacts_dir}/{project_name}/[/dim]\n"
         f"[dim]Artifacts         : {artifacts_dir}/[/dim]\n"
         f"[dim]Model             : {args.model}[/dim]\n"
+        f"[dim]{pipeline_config.summary()}[/dim]\n"
         f"[dim]Human checkpoints : {'enabled (4 review pauses)' if human_checkpoints else 'disabled (--auto)'}[/dim]",
         title="Starting Pipeline",
     ))
 
-    pipeline = Pipeline(artifacts_dir=artifacts_dir, human_checkpoints=human_checkpoints, project_name=project_name)
+    pipeline = Pipeline(
+        artifacts_dir=artifacts_dir,
+        human_checkpoints=human_checkpoints,
+        project_name=project_name,
+        config=pipeline_config,
+    )
     result = await pipeline.run(requirements, spec=spec, existing_spec=existing_spec)
     pipeline.print_summary(result)
     return 0 if result.passed else 1

@@ -1,18 +1,18 @@
 """
-Engineering Agent — orchestrates BackendAgent, BffAgent, and FrontendAgent
-to generate the full monorepo in parallel.
+Engineering Agent — orchestrates BackendAgent, BffAgent, FrontendAgent, and (optionally)
+MobileAgent to generate the full monorepo in parallel.
 
-All three sub-agents receive the same GeneratedSpecArtifact (forward contract)
+All enabled sub-agents receive the same GeneratedSpecArtifact (forward contract)
 so their code is consistent with each other from the start.
 
-assemble() merges the three per-service outputs into a single flat
-EngineeringArtifact that the rest of the pipeline consumes.
+assemble() merges per-service outputs into a single flat EngineeringArtifact
+that the rest of the pipeline consumes.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from rich.console import Console
 
@@ -27,17 +27,49 @@ from llm_sdlc_workflow.models.artifacts import (
 from .backend_agent import BackendAgent
 from .bff_agent import BffAgent
 from .frontend_agent import FrontendAgent
+from .mobile_agent import MobileAgent
 from .base_agent import BaseAgent
+
+if TYPE_CHECKING:
+    from llm_sdlc_workflow.config import PipelineConfig
 
 console = Console()
 
 
 class EngineeringAgent(BaseAgent):
-    def __init__(self, artifacts_dir: str = "./artifacts", generated_dir_name: str = "generated"):
+    def __init__(
+        self,
+        artifacts_dir: str = "./artifacts",
+        generated_dir_name: str = "generated",
+        config: Optional["PipelineConfig"] = None,
+    ):
         super().__init__(name="Engineering Agent", artifacts_dir=artifacts_dir, generated_dir_name=generated_dir_name)
-        self.backend_agent = BackendAgent(artifacts_dir, generated_dir_name=generated_dir_name)
-        self.bff_agent = BffAgent(artifacts_dir, generated_dir_name=generated_dir_name)
-        self.frontend_agent = FrontendAgent(artifacts_dir, generated_dir_name=generated_dir_name)
+        # Import here to avoid circular import at module load time
+        from llm_sdlc_workflow.config import PipelineConfig, ComponentConfig, TechConfig
+        cfg = config or PipelineConfig()
+        self._config = cfg
+
+        # Conditionally instantiate sub-agents based on config
+        self.backend_agent = (
+            BackendAgent(artifacts_dir, generated_dir_name=generated_dir_name,
+                         language=cfg.tech.backend_language, framework=cfg.tech.backend_framework)
+            if cfg.components.backend else None
+        )
+        self.bff_agent = (
+            BffAgent(artifacts_dir, generated_dir_name=generated_dir_name,
+                     language=cfg.tech.bff_language, framework=cfg.tech.bff_framework)
+            if cfg.components.bff else None
+        )
+        self.frontend_agent = (
+            FrontendAgent(artifacts_dir, generated_dir_name=generated_dir_name,
+                          framework=cfg.tech.frontend_framework, language=cfg.tech.frontend_language)
+            if cfg.components.frontend else None
+        )
+        self.mobile_agent = (
+            MobileAgent(artifacts_dir, generated_dir_name=generated_dir_name,
+                        platform=cfg.tech.mobile_hint())
+            if cfg.components.mobile else None
+        )
 
     async def run(
         self,
@@ -47,17 +79,27 @@ class EngineeringAgent(BaseAgent):
         review_feedback: Optional[ReviewFeedback] = None,
         iteration: int = 1,
     ) -> EngineeringArtifact:
-        """Run BE, BFF, and FE sub-agents in parallel, then assemble into one artifact."""
+        """Run enabled sub-agents in parallel, then assemble into one artifact."""
+        active = {
+            name: agent
+            for name, agent in [
+                ("backend",  self.backend_agent),
+                ("bff",      self.bff_agent),
+                ("frontend", self.frontend_agent),
+                ("mobile",   self.mobile_agent),
+            ]
+            if agent is not None
+        }
         console.print(
             f"[cyan]⚙  Engineering (iter {iteration}): "
-            "launching Backend + BFF + Frontend in parallel…[/cyan]"
+            f"launching {', '.join(active.keys())} in parallel…[/cyan]"
         )
-        be, bff, fe = await asyncio.gather(
-            self.backend_agent.run(intent, architecture, contract, review_feedback, iteration),
-            self.bff_agent.run(intent, architecture, contract, review_feedback, iteration),
-            self.frontend_agent.run(intent, architecture, contract, review_feedback, iteration),
+        results = await asyncio.gather(
+            *[a.run(intent, architecture, contract, review_feedback, iteration)
+              for a in active.values()]
         )
-        assembled = self._assemble(be, bff, fe, iteration)
+        service_artifacts = dict(zip(active.keys(), results))
+        assembled = self._assemble(service_artifacts, iteration)
         self.save_artifact(assembled, "03_engineering_artifact.json")
         return assembled
 
@@ -86,34 +128,34 @@ class EngineeringAgent(BaseAgent):
 
     def _assemble(
         self,
-        be: EngineeringArtifact,
-        bff: EngineeringArtifact,
-        fe: EngineeringArtifact,
+        service_artifacts: dict,  # {service_name: EngineeringArtifact}
         iteration: int,
     ) -> EngineeringArtifact:
-        """Merge three per-service artifacts into one flat EngineeringArtifact."""
-        all_files = be.generated_files + bff.generated_files + fe.generated_files
-        all_endpoints = list({ep for a in (be, bff, fe) for ep in a.api_endpoints})
-        all_models = list({m for a in (be, bff, fe) for m in a.data_models})
-        all_env = {**be.environment_variables, **bff.environment_variables, **fe.environment_variables}
-        all_steps = be.implementation_steps + bff.implementation_steps + fe.implementation_steps
-        all_notes = be.spec_compliance_notes + bff.spec_compliance_notes + fe.spec_compliance_notes
-        all_decisions = be.decisions + bff.decisions + fe.decisions
-        all_feedback = (
-            be.review_feedback_applied
-            + bff.review_feedback_applied
-            + fe.review_feedback_applied
+        """Merge per-service artifacts into one flat EngineeringArtifact."""
+        all_files = [f for a in service_artifacts.values() for f in a.generated_files]
+        all_endpoints = list({ep for a in service_artifacts.values() for ep in a.api_endpoints})
+        all_models = list({m for a in service_artifacts.values() for m in a.data_models})
+        all_env = {k: v for a in service_artifacts.values() for k, v in a.environment_variables.items()}
+        all_steps = [s for a in service_artifacts.values() for s in a.implementation_steps]
+        all_notes = [n for a in service_artifacts.values() for n in a.spec_compliance_notes]
+        all_decisions = [d for a in service_artifacts.values() for d in a.decisions]
+        all_feedback = [f for a in service_artifacts.values() for f in a.review_feedback_applied]
+
+        be = service_artifacts.get("backend")
+        fe = service_artifacts.get("frontend")
+
+        svc_breakdown = ", ".join(
+            f"{name} ({len(a.generated_files)} files)"
+            for name, a in service_artifacts.items()
         )
         assembled = EngineeringArtifact(
             service_name=None,
-            services={
-                "backend": self._to_service(be),
-                "bff": self._to_service(bff),
-                "frontend": self._to_service(fe),
-            },
-            backend_tech=be.backend_tech,
-            frontend_tech=fe.frontend_tech,
-            infrastructure="three-tier monorepo: backend (8081) + bff (8080) + frontend (3000)",
+            services={name: self._to_service(a) for name, a in service_artifacts.items()},
+            backend_tech=be.backend_tech if be else None,
+            frontend_tech=fe.frontend_tech if fe else None,
+            infrastructure=" + ".join(
+                f"{name} ({self._port_hint(name)})" for name in service_artifacts
+            ),
             generated_files=all_files,
             implementation_steps=all_steps,
             environment_variables=all_env,
@@ -125,11 +167,13 @@ class EngineeringAgent(BaseAgent):
             review_feedback_applied=all_feedback,
         )
         console.print(
-            f"[green]✅ Engineering assembled: "
-            f"{len(be.generated_files)} BE + {len(bff.generated_files)} BFF + "
-            f"{len(fe.generated_files)} FE = {len(all_files)} total files[/green]"
+            f"[green]✅ Engineering assembled: {svc_breakdown} = {len(all_files)} total files[/green]"
         )
         return assembled
+
+    def _port_hint(self, service: str) -> str:
+        defaults = {"backend": "8081", "bff": "8080", "frontend": "3000", "mobile": "8081 (API)"}
+        return defaults.get(service, "?")
 
     def _to_service(self, artifact: EngineeringArtifact) -> ServiceArtifact:
         return ServiceArtifact(

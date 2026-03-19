@@ -9,10 +9,20 @@ from .base_agent import BaseAgent, load_prompt
 
 SYSTEM_PROMPT = load_prompt("backend_agent.md")
 
+_BACKEND_DEFAULT = "Kotlin/Spring Boot (Spring Boot 3.3, Kotlin 1.9, Gradle Kotlin DSL)"
+
 
 class BackendAgent(BaseAgent):
-    def __init__(self, artifacts_dir: str = "./artifacts", generated_dir_name: str = "generated"):
+    def __init__(
+        self,
+        artifacts_dir: str = "./artifacts",
+        generated_dir_name: str = "generated",
+        language: Optional[str] = None,
+        framework: Optional[str] = None,
+    ):
         super().__init__(name="Backend Agent", artifacts_dir=artifacts_dir, generated_dir_name=generated_dir_name)
+        parts = [p for p in [language, framework] if p]
+        self.tech_hint = " / ".join(parts) if parts else _BACKEND_DEFAULT
 
     async def run(
         self,
@@ -27,6 +37,8 @@ class BackendAgent(BaseAgent):
 
         plan_message = f"""Plan and list every file for the backend/ service.
 
+Tech stack: {self.tech_hint}
+
 ## Discovery
 {self._compact(intent)}
 
@@ -34,10 +46,10 @@ class BackendAgent(BaseAgent):
 {self._compact(architecture)}
 {spec_section}{feedback_section}
 
-Return JSON with every file's content = \"__PENDING__\". Valid json."""
+Return JSON with every file's content = "__PENDING__". Valid json."""
 
         fill_tmpl = (
-            "Write COMPLETE, RUNNABLE Kotlin/Spring Boot content for: {path}\n"
+            f"Write COMPLETE, RUNNABLE {self.tech_hint} content for: {{path}}\n"
             "Purpose: {purpose}\n"
             "Service: backend (port 8081, internal)\n"
             "Architecture: {arch_style}\n"

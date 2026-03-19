@@ -44,6 +44,7 @@ from llm_sdlc_workflow.agents import (
     SpecAgent,
     TestingAgent,
 )
+from llm_sdlc_workflow.config import PipelineConfig
 from llm_sdlc_workflow.models.artifacts import (
     ArchitectureArtifact,
     DiscoveryArtifact,
@@ -106,15 +107,24 @@ class PipelineResult:
 
 
 class Pipeline:
-    def __init__(self, artifacts_dir: str = "./artifacts", human_checkpoints: bool = True, project_name: str = "generated"):
+    def __init__(
+        self,
+        artifacts_dir: str = "./artifacts",
+        human_checkpoints: bool = True,
+        project_name: str = "generated",
+        config: Optional[PipelineConfig] = None,
+    ):
         self.artifacts_dir = artifacts_dir
         self.human_checkpoints = human_checkpoints
         self.project_name = project_name
+        self.config = config or PipelineConfig()
         os.makedirs(artifacts_dir, exist_ok=True)
         self.discovery_agent = DiscoveryAgent(artifacts_dir)
         self.architecture_agent = ArchitectureAgent(artifacts_dir)
         self.spec_agent = SpecAgent(artifacts_dir, generated_dir_name=project_name)
-        self.engineering_agent = EngineeringAgent(artifacts_dir, generated_dir_name=project_name)
+        self.engineering_agent = EngineeringAgent(
+            artifacts_dir, generated_dir_name=project_name, config=self.config
+        )
         self.infrastructure_agent = InfrastructureAgent(artifacts_dir, generated_dir_name=project_name)
         self.review_agent = ReviewAgent(artifacts_dir)
         self.testing_agent = TestingAgent(artifacts_dir, generated_dir_name=project_name)
@@ -136,7 +146,8 @@ class Pipeline:
             "Discovery → Architecture → [Test] → Spec → "
             "[Engineering ‖ Infrastructure] → "
             "Review loop (max " + str(MAX_REVIEW_ITERATIONS) + ") → "
-            "[Live Test + Cypress] → [Final Test]",
+            "[Live Test + Cypress] → [Final Test]\n\n"
+            f"[dim]{self.config.summary()}[/dim]",
             title="Pipeline",
             style="bold blue",
         ))

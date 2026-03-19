@@ -272,7 +272,7 @@ class TestEngineeringAgent:
         be = EngineeringArtifact(api_endpoints=["GET /tasks"], data_models=["Task"])
         bff = EngineeringArtifact(api_endpoints=["GET /api/tasks"], data_models=["Task"])
         fe = EngineeringArtifact(api_endpoints=[], data_models=["User"])
-        result = agent._assemble(be, bff, fe, iteration=1)
+        result = agent._assemble({"backend": be, "bff": bff, "frontend": fe}, iteration=1)
         # endpoints are deduped via set
         assert "GET /tasks" in result.api_endpoints
         assert "GET /api/tasks" in result.api_endpoints
@@ -286,7 +286,7 @@ class TestEngineeringAgent:
         be = EngineeringArtifact(environment_variables={"DB_URL": "jdbc:pg://db"})
         bff = EngineeringArtifact(environment_variables={"BFF_PORT": "8080"})
         fe = EngineeringArtifact(environment_variables={"VITE_API": "/api"})
-        result = agent._assemble(be, bff, fe, iteration=1)
+        result = agent._assemble({"backend": be, "bff": bff, "frontend": fe}, iteration=1)
         assert result.environment_variables["DB_URL"] == "jdbc:pg://db"
         assert result.environment_variables["BFF_PORT"] == "8080"
         assert result.environment_variables["VITE_API"] == "/api"
@@ -296,7 +296,7 @@ class TestEngineeringAgent:
         be = EngineeringArtifact(service_name="backend")
         bff = EngineeringArtifact(service_name="bff")
         fe = EngineeringArtifact(service_name="frontend")
-        result = agent._assemble(be, bff, fe, iteration=1)
+        result = agent._assemble({"backend": be, "bff": bff, "frontend": fe}, iteration=1)
         assert "backend" in result.services
         assert "bff" in result.services
         assert "frontend" in result.services
