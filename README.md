@@ -138,7 +138,9 @@ Control which service sub-agents run:
 | `--no-bff` | `components.bff: false` | BFF disabled — useful for API-only or mobile-first projects |
 | _(default)_ | `components.frontend: true` | Frontend sub-agent enabled |
 | `--no-frontend` | `components.frontend: false` | Frontend disabled — API-only or mobile project |
-| `--mobile` | `components.mobile: true` | Mobile sub-agent enabled (React Native by default) |
+| `--mobile` | `components.mobile_platforms: ["React Native"]` | Single React Native mobile app |
+| `--mobile-platform P` | `components.mobile_platforms: [P]` | Single platform of your choice |
+| `--mobile-platform P1 --mobile-platform P2` | `components.mobile_platforms: [P1, P2]` | **Multiple platforms in parallel** |
 
 ### Tech-Stack Preferences
 
@@ -152,7 +154,7 @@ Override the language and/or framework for any service:
 | `--bff-framework FW` | `tech.bff_framework` | Spring WebFlux |
 | `--frontend-framework FW` | `tech.frontend_framework` | React 18 |
 | `--frontend-lang LANG` | `tech.frontend_language` | TypeScript |
-| `--mobile-platform PLAT` | `tech.mobile_platform` | React Native |
+| `--mobile-platform PLAT` | `components.mobile_platforms: [PLAT]` | React Native (when `--mobile` is set) |
 
 ### Common Configurations
 
@@ -198,8 +200,8 @@ python3.11 main.py \
 python3.11 main.py \
   --requirements reqs.txt \
   --mobile
-# Mobile sub-agent generates a React Native (Expo SDK 51) app in mobile/
-# that talks to BFF via BFF_BASE_URL env var
+# Generates mobile_react_native/ — React Native (Expo SDK 51) app
+# connecting to BFF via BFF_BASE_URL env var
 ```
 
 #### Full stack + Flutter mobile
@@ -207,18 +209,28 @@ python3.11 main.py \
 ```bash
 python3.11 main.py \
   --requirements reqs.txt \
-  --mobile \
   --mobile-platform Flutter
 ```
 
-#### Mobile-only (no web frontend)
+#### iOS **and** Android native — generated in parallel
 
 ```bash
 python3.11 main.py \
   --requirements reqs.txt \
-  --no-frontend \
-  --mobile \
-  --mobile-platform "iOS (Swift)"
+  --mobile-platform "iOS (Swift)" \
+  --mobile-platform "Android (Kotlin)"
+# Runs two MobileAgents in parallel via asyncio.gather
+# Outputs: mobile_ios_swift/ and mobile_android_kotlin/
+```
+
+#### All three mobile targets at once
+
+```bash
+python3.11 main.py \
+  --requirements reqs.txt \
+  --mobile-platform "React Native" \
+  --mobile-platform "iOS (Swift)" \
+  --mobile-platform "Android (Kotlin)"
 ```
 
 #### Node.js/NestJS BFF, no mobile
@@ -242,7 +254,16 @@ components:
   backend: true      # Set false to... why would you?
   bff: true          # Set false for API-only or mobile-only projects
   frontend: true     # Set false for API-only or mobile-only projects
-  mobile: false      # Set true to enable the Mobile sub-agent
+
+  # mobile_platforms: list of platforms to generate in parallel.
+  # Empty (or omit) = mobile disabled.
+  # Each entry spawns one MobileAgent; all run concurrently via asyncio.gather.
+  # Outputs land in: generated/mobile_react_native/, generated/mobile_ios_swift/, etc.
+  mobile_platforms: []
+  # mobile_platforms: ["React Native"]
+  # mobile_platforms: ["iOS (Swift)", "Android (Kotlin)"]
+  # mobile_platforms: ["Flutter"]
+  # mobile_platforms: ["React Native", "iOS (Swift)", "Android (Kotlin)"]
 
 # ─── Tech-Stack Preferences ──────────────────────────────────────────────────
 # Leave null to use each agent's built-in default.
@@ -259,8 +280,7 @@ tech:
   frontend_framework: null   # "Vue" | "Angular" | "Next.js" | "Svelte" | ...
   frontend_language: null    # "TypeScript" | "JavaScript"
 
-  # Mobile (only when components.mobile: true)
-  mobile_platform: null      # "React Native" | "Flutter" | "iOS (Swift)" | "Android (Kotlin)"
+  # Note: mobile platform(s) are set via components.mobile_platforms above.
 
 # ─── Spec-Driven Constraints ─────────────────────────────────────────────────
 spec:
@@ -271,16 +291,30 @@ spec:
 
 ### Mobile Agent
 
-The Mobile Agent generates a complete mobile client under `mobile/` that connects to the BFF (or directly to the backend when BFF is disabled).
+The Mobile Agent generates a complete mobile client that connects to the BFF (or directly to the backend when BFF is disabled). **Multiple platforms can be generated simultaneously** — each one runs as an independent `MobileAgent` instance via `asyncio.gather`, writing to its own subdirectory.
 
-| Platform | Default stack |
-|---|---|
-| **React Native** _(default)_ | Expo SDK 51, React Navigation 6, Zustand, Axios |
-| **Flutter** | Riverpod 2, Dio, GoRouter, Flutter 3.22 |
-| **iOS (Swift)** | SwiftUI + Combine, URLSession, async/await |
-| **Android (Kotlin)** | Jetpack Compose + ViewModel, Retrofit 2, Coroutines |
+| Platform | Slug (output dir) | Default stack |
+|---|---|---|
+| **React Native** _(default)_ | `mobile_react_native/` | Expo SDK 51, React Navigation 6, Zustand, Axios |
+| **Flutter** | `mobile_flutter/` | Riverpod 2, Dio, GoRouter, Flutter 3.22 |
+| **iOS (Swift)** | `mobile_ios_swift/` | SwiftUI + Combine, URLSession, async/await |
+| **Android (Kotlin)** | `mobile_android_kotlin/` | Jetpack Compose + ViewModel, Retrofit 2, Coroutines |
 
-The BFF URL is injected via the `BFF_BASE_URL` environment variable so the mobile app can point at different environments (local dev, staging, production) without code changes.
+The BFF URL is injected via the `BFF_BASE_URL` environment variable. Each platform's artifact is saved as `03d_<slug>_artifact.json`.
+
+**Example — iOS + Android in one run:**
+
+```bash
+python3.11 main.py \
+  --requirements reqs.txt \
+  --mobile-platform "iOS (Swift)" \
+  --mobile-platform "Android (Kotlin)"
+# Both agents run concurrently. Outputs:
+#   generated/mobile_ios_swift/
+#   generated/mobile_android_kotlin/
+#   artifacts/03d_mobile_ios_swift_artifact.json
+#   artifacts/03d_mobile_android_kotlin_artifact.json
+```
 
 ---
 
@@ -463,14 +497,15 @@ output_dir: ./artifacts/my_project
 
 components:
   bff: false            # API-only: no BFF layer
-  mobile: true          # generate a Flutter mobile client
+  mobile_platforms:     # generate two native apps in parallel
+    - "iOS (Swift)"
+    - "Android (Kotlin)"
 
 tech:
   backend_language: Go
   backend_framework: Gin
   frontend_framework: Vue
   frontend_language: TypeScript
-  mobile_platform: Flutter
 
 spec:
   tech_constraints: "PostgreSQL 16, Redis 7, JWT auth"
@@ -935,8 +970,13 @@ The chain is fully composable — every run reads `generated/specs/` from the pr
 --bff-framework FW        BFF framework, e.g. "NestJS"  (default: Spring WebFlux)
 --frontend-framework FW   Frontend framework, e.g. "Vue", "Next.js"  (default: React 18)
 --frontend-lang LANG      Frontend language  (default: TypeScript)
---mobile-platform PLAT    Mobile platform: "React Native", "Flutter", "iOS (Swift)",
-                          "Android (Kotlin)"  (default: React Native)
+--mobile-platform PLAT    Mobile platform — can be given MULTIPLE TIMES to generate
+                          several platforms in parallel:
+                            --mobile-platform "iOS (Swift)"
+                            --mobile-platform "iOS (Swift)" --mobile-platform "Android (Kotlin)"
+                          Valid values: "React Native", "Flutter",
+                                        "iOS (Swift)", "Android (Kotlin)"
+                          Default (when --mobile is set): React Native
 ```
 
 ---
@@ -954,7 +994,9 @@ artifacts/run_20260318_120000/
 ├── 03a_backend_artifact.json            # Backend sub-agent output
 ├── 03b_bff_artifact.json                # BFF sub-agent output  (omitted when --no-bff)
 ├── 03c_frontend_artifact.json           # Frontend sub-agent output  (omitted when --no-frontend)
-├── 03d_mobile_artifact.json             # Mobile sub-agent output  (present when --mobile)
+├── 03d_mobile_react_native_artifact.json  # Mobile agent — React Native  (one file per platform)
+├── 03d_mobile_ios_swift_artifact.json     # Mobile agent — iOS (Swift)
+├── 03d_mobile_android_kotlin_artifact.json# Mobile agent — Android (Kotlin)
 ├── 04_generated_spec_artifact.json      # Spec Agent — forward contract
 ├── 04_review_artifact.json              # Review Agent output
 ├── 05a_testing_architecture.json        # Testing: architecture stage
@@ -976,10 +1018,10 @@ artifacts/run_20260318_120000/
     │   ├── src/
     │   ├── nginx.conf
     │   └── Dockerfile
-    ├── mobile/                          # React Native / Flutter / Swift / Kotlin — opt-in
-    │   ├── package.json                 #   (or pubspec.yaml for Flutter)
-    │   ├── src/
-    │   └── app.json
+    ├── mobile_react_native/             # React Native (Expo) — one dir per platform
+    ├── mobile_ios_swift/                # iOS (Swift) — when --mobile-platform "iOS (Swift)"
+    ├── mobile_android_kotlin/           # Android — when --mobile-platform "Android (Kotlin)"
+    ├── mobile_flutter/                  # Flutter — when --mobile-platform Flutter
     ├── specs/                           # Forward contract (use with --from-run)
     │   ├── openapi.yaml                 # OpenAPI 3.0 — all endpoints
     │   └── schema.sql                   # SQL DDL — all tables

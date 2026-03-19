@@ -184,8 +184,14 @@ Examples:
         help='Frontend language, e.g. "TypeScript", "JavaScript". Default: TypeScript.'
     )
     tech.add_argument(
-        "--mobile-platform", metavar="PLATFORM",
-        help='Mobile platform, e.g. "React Native", "Flutter", "iOS (Swift)", "Android (Kotlin)". Default: React Native.'
+        "--mobile-platform", metavar="PLATFORM", action="append", dest="mobile_platforms",
+        help=(
+            'Mobile platform to generate. Can be specified multiple times to generate '
+            'several platforms in parallel, e.g. '
+            '--mobile-platform "iOS (Swift)" --mobile-platform "Android (Kotlin)". '
+            'Implies --mobile. Valid values: "React Native", "Flutter", '
+            '"iOS (Swift)", "Android (Kotlin)". Default (when --mobile is set): React Native.'
+        )
     )
     return parser.parse_args()
 
@@ -241,15 +247,23 @@ def _apply_config(args: argparse.Namespace) -> None:
 
     # components block — only apply if flag not already set by CLI
     comp_cfg = cfg.get("components") or {}
+    tech_cfg = cfg.get("tech") or {}
+
     if not args.no_bff and comp_cfg.get("bff") is False:
         args.no_bff = True
     if not args.no_frontend and comp_cfg.get("frontend") is False:
         args.no_frontend = True
-    if not args.mobile and comp_cfg.get("mobile") is True:
-        args.mobile = True
+    # New form: components.mobile_platforms list
+    yaml_platforms = comp_cfg.get("mobile_platforms") or []
+    # Old form: components.mobile: true + tech.mobile_platform scalar
+    if not yaml_platforms and comp_cfg.get("mobile"):
+        scalar = tech_cfg.get("mobile_platform")
+        yaml_platforms = [scalar] if scalar else ["React Native"]
+    if yaml_platforms and not args.mobile_platforms:
+        args.mobile_platforms = yaml_platforms
+        args.mobile = True  # keep the flag consistent
 
     # tech block
-    tech_cfg = cfg.get("tech") or {}
     if not args.backend_lang and tech_cfg.get("backend_language"):
         args.backend_lang = tech_cfg["backend_language"]
     if not args.backend_framework and tech_cfg.get("backend_framework"):
@@ -262,8 +276,6 @@ def _apply_config(args: argparse.Namespace) -> None:
         args.frontend_framework = tech_cfg["frontend_framework"]
     if not args.frontend_lang and tech_cfg.get("frontend_language"):
         args.frontend_lang = tech_cfg["frontend_language"]
-    if not args.mobile_platform and tech_cfg.get("mobile_platform"):
-        args.mobile_platform = tech_cfg["mobile_platform"]
 
     console.print(f"[dim]Config loaded from {config_path}[/dim]")
 
@@ -443,13 +455,20 @@ async def async_main(args: argparse.Namespace, requirements: str, spec, existing
     human_checkpoints = not getattr(args, "auto", False)
     project_name = _resolve_project_name(args)
 
+    # Resolve mobile_platforms list
+    # --mobile-platform can be given multiple times (action=append) → list
+    # --mobile alone → ["React Native"]
+    raw_platforms = getattr(args, "mobile_platforms", None) or []
+    if not raw_platforms and getattr(args, "mobile", False):
+        raw_platforms = ["React Native"]
+
     # Build pipeline configuration from CLI args
     pipeline_config = PipelineConfig(
         components=ComponentConfig(
             backend=True,  # always enabled
             bff=not getattr(args, "no_bff", False),
             frontend=not getattr(args, "no_frontend", False),
-            mobile=getattr(args, "mobile", False),
+            mobile_platforms=raw_platforms,
         ),
         tech=TechConfig(
             backend_language=getattr(args, "backend_lang", None),
@@ -458,7 +477,6 @@ async def async_main(args: argparse.Namespace, requirements: str, spec, existing
             bff_framework=getattr(args, "bff_framework", None),
             frontend_framework=getattr(args, "frontend_framework", None),
             frontend_language=getattr(args, "frontend_lang", None),
-            mobile_platform=getattr(args, "mobile_platform", None),
         ),
     )
 

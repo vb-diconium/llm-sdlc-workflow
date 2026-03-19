@@ -23,7 +23,16 @@ components:
   backend: true        # Always recommended. Set false to... why would you?
   bff: true            # Backend-for-Frontend proxy layer. Set false for API-only projects.
   frontend: true       # Web frontend. Set false for API-only or mobile-only projects.
-  mobile: false        # Mobile app (React Native by default). Set true to enable.
+
+  # mobile_platforms: list of platforms to generate in parallel.
+  # Each entry spawns an independent MobileAgent. Leave empty (or omit) to disable.
+  # Overridden by --mobile-platform on the CLI (can be given multiple times).
+  #
+  # Examples:
+  #   mobile_platforms: ["React Native"]
+  #   mobile_platforms: ["iOS (Swift)", "Android (Kotlin)"]
+  #   mobile_platforms: ["Flutter"]
+  mobile_platforms: []
 
 # ─── Tech-Stack Preferences ──────────────────────────────────────────────────
 # Language and framework overrides for each sub-agent.
@@ -52,8 +61,7 @@ tech:
   frontend_framework: null    # e.g. "Vue", "Angular", "Next.js", "Svelte"
   frontend_language: null     # e.g. "TypeScript", "JavaScript"
 
-  # Mobile (only used when components.mobile = true)
-  mobile_platform: null       # e.g. "React Native", "Flutter", "iOS (Swift)", "Android (Kotlin)"
+  # Note: mobile platform is set via components.mobile_platforms (list), not here.
 
 # ─── Spec-Driven Development ─────────────────────────────────────────────────
 # These constraints are forwarded to the Architecture and Engineering agents.

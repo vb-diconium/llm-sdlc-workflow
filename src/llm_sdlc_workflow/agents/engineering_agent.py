@@ -65,11 +65,11 @@ class EngineeringAgent(BaseAgent):
                           framework=cfg.tech.frontend_framework, language=cfg.tech.frontend_language)
             if cfg.components.frontend else None
         )
-        self.mobile_agent = (
-            MobileAgent(artifacts_dir, generated_dir_name=generated_dir_name,
-                        platform=cfg.tech.mobile_hint())
-            if cfg.components.mobile else None
-        )
+        # One MobileAgent per configured platform — all run in parallel
+        self.mobile_agents: list[MobileAgent] = [
+            MobileAgent(artifacts_dir, generated_dir_name=generated_dir_name, platform=p)
+            for p in cfg.components.mobile_platforms
+        ]
 
     async def run(
         self,
@@ -86,10 +86,12 @@ class EngineeringAgent(BaseAgent):
                 ("backend",  self.backend_agent),
                 ("bff",      self.bff_agent),
                 ("frontend", self.frontend_agent),
-                ("mobile",   self.mobile_agent),
             ]
             if agent is not None
         }
+        # Add one entry per mobile platform (each has a unique slug key)
+        for mobile_agent in self.mobile_agents:
+            active[mobile_agent.slug] = mobile_agent
         console.print(
             f"[cyan]⚙  Engineering (iter {iteration}): "
             f"launching {', '.join(active.keys())} in parallel…[/cyan]"
@@ -172,8 +174,12 @@ class EngineeringAgent(BaseAgent):
         return assembled
 
     def _port_hint(self, service: str) -> str:
-        defaults = {"backend": "8081", "bff": "8080", "frontend": "3000", "mobile": "8081 (API)"}
-        return defaults.get(service, "?")
+        defaults = {"backend": "8081", "bff": "8080", "frontend": "3000"}
+        if service in defaults:
+            return defaults[service]
+        if service.startswith("mobile_"):
+            return "BFF_BASE_URL"
+        return "?"
 
     def _to_service(self, artifact: EngineeringArtifact) -> ServiceArtifact:
         return ServiceArtifact(

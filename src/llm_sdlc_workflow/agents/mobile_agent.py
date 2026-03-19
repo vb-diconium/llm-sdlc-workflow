@@ -1,10 +1,23 @@
-"""Mobile sub-agent — generates the mobile/ service in the monorepo."""
+"""Mobile sub-agent — generates a mobile/<slug>/ service in the monorepo.
+
+Multiple MobileAgent instances can run in parallel (one per platform).
+Each agent writes to its own subdirectory and saves its own artifact file so
+their outputs never collide.
+
+    Examples::
+
+        MobileAgent(platform="React Native")     → mobile_react_native/
+        MobileAgent(platform="iOS (Swift)")       → mobile_ios_swift/
+        MobileAgent(platform="Android (Kotlin)")  → mobile_android_kotlin/
+        MobileAgent(platform="Flutter")           → mobile_flutter/
+"""
 from __future__ import annotations
 from typing import Optional
 from llm_sdlc_workflow.models.artifacts import (
     ArchitectureArtifact, EngineeringArtifact, GeneratedSpecArtifact,
     DiscoveryArtifact, ReviewFeedback,
 )
+from llm_sdlc_workflow.config import platform_slug
 from .base_agent import BaseAgent, load_prompt
 
 SYSTEM_PROMPT = load_prompt("mobile_agent.md")
@@ -18,11 +31,13 @@ class MobileAgent(BaseAgent):
         platform: str = "React Native",
     ):
         super().__init__(
-            name="Mobile Agent",
+            name=f"Mobile Agent ({platform})",
             artifacts_dir=artifacts_dir,
             generated_dir_name=generated_dir_name,
         )
         self.platform = platform
+        self.slug = platform_slug(platform)          # e.g. "mobile_react_native"
+        self._artifact_filename = f"03d_{self.slug}_artifact.json"
 
     async def run(
         self,
@@ -36,7 +51,7 @@ class MobileAgent(BaseAgent):
         feedback_section = self._build_feedback_section(review_feedback)
         bff_url = self._bff_url(contract)
 
-        plan_message = f"""Plan and list every file for the mobile/ service.
+        plan_message = f"""Plan and list every file for the {self.slug}/ service.
 
 Platform: {self.platform}
 
@@ -54,7 +69,7 @@ Return JSON with every file's content = \"__PENDING__\". Valid json."""
         fill_tmpl = (
             f"Write COMPLETE, RUNNABLE {self.platform} content for: {{path}}\n"
             "Purpose: {purpose}\n"
-            f"Service: mobile ({self.platform})\n"
+            f"Service: {self.slug} ({self.platform})\n"
             f"API base URL env var: BFF_BASE_URL (points to {bff_url})\n"
             "Architecture: {arch_style}\n"
             "API endpoints: {endpoints_summary}\n\n"
@@ -75,13 +90,13 @@ Return JSON with every file's content = \"__PENDING__\". Valid json."""
                 ) if contract.openapi_spec else "see architecture",
             },
         )
-        artifact.service_name = "mobile"
+        artifact.service_name = self.slug
         artifact.review_iteration = iteration
         if review_feedback:
             artifact.review_feedback_applied = (
                 list(review_feedback.critical_issues) + list(review_feedback.high_issues)
             )
-        self.save_artifact(artifact, "03d_mobile_artifact.json")
+        self.save_artifact(artifact, self._artifact_filename)
         self._write_service_files(artifact)
         self.save_history()
         return artifact
@@ -115,6 +130,7 @@ Return JSON with every file's content = \"__PENDING__\". Valid json."""
         return "\n".join(lines)
 
     def _write_service_files(self, artifact: EngineeringArtifact) -> None:
+        """Write generated files under generated/<slug>/."""
         import os
         from rich.console import Console
         con = Console()
@@ -122,6 +138,9 @@ Return JSON with every file's content = \"__PENDING__\". Valid json."""
         os.makedirs(base, exist_ok=True)
         for f in artifact.generated_files:
             safe = os.path.normpath(f.path).lstrip(os.sep)
+            # Ensure files land under <slug>/ even if the LLM writes bare filenames
+            if not safe.startswith(self.slug + os.sep) and not safe.startswith(self.slug + "/"):
+                safe = os.path.join(self.slug, safe)
             full = os.path.join(base, safe)
             os.makedirs(os.path.dirname(full), exist_ok=True)
             with open(full, "w") as fh:
