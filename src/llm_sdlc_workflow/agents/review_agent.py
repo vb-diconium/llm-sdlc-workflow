@@ -24,10 +24,86 @@ from .base_agent import BaseAgent, load_prompt
 
 SYSTEM_PROMPT = load_prompt("review_agent.md")
 
+# Files whose full content is critical for a meaningful code review.
+# All others are listed path-only to keep context size manageable.
+_KEY_FILE_PATTERNS = (
+    "controller", "service", "config", "application.yml",
+    "docker-compose", "nginx.conf", "dockerfile",
+    "webclient", "exception", "handler", "interceptor",
+    "useeffect", "usefetch", "app.tsx", "index.tsx",
+    "client.ts", "homepage", "backendclient",
+    "appconfig", "webconfig", "security",
+)
+_MAX_CONTENT_CHARS = 3000   # per file — truncated if longer
+_MAX_CONTENT_FILES = 30     # max files whose content we embed
+
 
 class ReviewAgent(BaseAgent):
     def __init__(self, artifacts_dir: str = "./artifacts", generated_dir_name: str = "generated"):
         super().__init__(name="Review Agent", artifacts_dir=artifacts_dir, generated_dir_name=generated_dir_name)
+
+    # ─── Rich context helpers ────────────────────────────────────────────────
+
+    def _engineering_review_context(self, engineering: EngineeringArtifact) -> str:
+        """Build a review-friendly summary that includes actual file content
+        for implementation-critical files.
+
+        Key files (controllers, services, configs, etc.) get their full source
+        included (truncated at _MAX_CONTENT_CHARS).  All other files are listed
+        by path + purpose only so the context stays manageable.
+        """
+        files = engineering.generated_files
+        key, other = [], []
+        for f in files:
+            path_lower = f.path.lower()
+            if any(pat in path_lower for pat in _KEY_FILE_PATTERNS):
+                key.append(f)
+            else:
+                other.append(f)
+
+        lines = [
+            f"### EngineeringArtifact — {len(files)} files total",
+            f"Backend  : {engineering.backend_tech.framework if engineering.backend_tech else '?'}",
+            f"Frontend : {engineering.frontend_tech.framework if engineering.frontend_tech else '?'}",
+            "",
+            f"#### Implementation-critical files ({min(len(key), _MAX_CONTENT_FILES)} of {len(key)} shown with content)",
+        ]
+        for f in key[:_MAX_CONTENT_FILES]:
+            content = f.content
+            if len(content) > _MAX_CONTENT_CHARS:
+                content = content[:_MAX_CONTENT_CHARS] + "\n... [truncated]"
+            lines.append(f"\n--- {f.path} ---")
+            lines.append(content)
+
+        if other:
+            lines.append(f"\n#### Other files (path/purpose only, {len(other)} files)")
+            for f in other:
+                lines.append(f"  - {f.path} — {f.purpose[:80]}")
+
+        if engineering.environment_variables:
+            lines.append("\n#### Environment variables")
+            for k, v in list(engineering.environment_variables.items())[:20]:
+                lines.append(f"  {k}={v}")
+
+        return "\n".join(lines)
+
+    def _infra_review_context(self, infrastructure: InfrastructureArtifact) -> str:
+        """Include full content for all IaC files (they are usually few and small)."""
+        files = infrastructure.iac_files
+        lines = [f"### InfrastructureArtifact — {len(files)} IaC files"]
+        for f in files:
+            content = f.content
+            if len(content) > _MAX_CONTENT_CHARS:
+                content = content[:_MAX_CONTENT_CHARS] + "\n... [truncated]"
+            lines.append(f"\n--- {f.path} ---")
+            lines.append(content)
+        if infrastructure.environment_variables:
+            lines.append("\n#### Infrastructure env vars")
+            for k, v in list(infrastructure.environment_variables.items())[:20]:
+                lines.append(f"  {k}={v}")
+        return "\n".join(lines)
+
+    # ─── Main run ────────────────────────────────────────────────────────────
 
     async def run(
         self,
@@ -56,10 +132,10 @@ class ReviewAgent(BaseAgent):
 {self._compact(architecture)}
 
 ## Engineering Artifact (source code)
-{self._compact(engineering)}
+{self._engineering_review_context(engineering)}
 
 ## Infrastructure Artifact (IaC files)
-{self._compact(infrastructure)}
+{self._infra_review_context(infrastructure)}
 {prev_section}
 
 Review both the source code AND the IaC files.
