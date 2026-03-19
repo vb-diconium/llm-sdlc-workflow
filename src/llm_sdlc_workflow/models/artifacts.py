@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def _coerce_str_list(v: Any) -> List[str]:
@@ -61,6 +61,26 @@ class DecisionRecord(BaseModel):
     alternatives_considered: List[str] = []
     trade_offs: List[str] = []
     timestamp: str = Field(default_factory=lambda: datetime.now().isoformat())
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_decision_fields(cls, v: Any) -> Any:
+        """Coerce LLM responses that use 'title' instead of 'decision'."""
+        if isinstance(v, dict):
+            v = dict(v)
+            # LLM sometimes returns 'title' instead of 'decision'
+            if "decision" not in v:
+                for key in ("title", "name", "summary"):
+                    if key in v:
+                        v["decision"] = v.pop(key)
+                        break
+            # LLM sometimes omits 'rationale' or uses a different key
+            if "rationale" not in v:
+                v["rationale"] = (
+                    v.get("description") or v.get("reason")
+                    or v.get("justification") or v.get("context") or ""
+                )
+        return v
 
     @field_validator("alternatives_considered", "trade_offs", mode="before")
     @classmethod

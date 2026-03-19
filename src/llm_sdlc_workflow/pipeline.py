@@ -24,13 +24,14 @@ Flow:
 from __future__ import annotations
 
 import asyncio
+import glob
 import json
 import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from rich.console import Console
 from rich.panel import Panel
@@ -64,6 +65,55 @@ console = Console()
 MAX_REVIEW_ITERATIONS = 3
 MAX_ARCH_ITERATIONS = 3      # max architecture re-design iterations before giving up
 MAX_INFRA_TEST_RETRIES = 2   # max re-runs of failed services after Stage 2 testing
+
+# ─── Resume / checkpoint support ────────────────────────────────────────────
+# Ordered list of user-facing stage names.  Stages before the resume point are
+# skipped when the corresponding artifact is already present in the checkpoint.
+_STAGE_ORDER: List[str] = [
+    "discovery",       # Step 1  — requirements analysis
+    "architecture",    # Step 2  — arch design + architecture testing loop
+    "spec",            # Step 3  — forward contract (OpenAPI + DDL)
+    "engineering",     # Step 5  — code gen + infra IaC plan (parallel)
+    "review",          # Step 6  — review loop
+    "infrastructure",  # Step 7  — start containers + CI/CD generation
+    "testing",         # Step 7b+8 — live HTTP tests + final testing
+]
+
+
+def _auto_detect_resume_stage(run_dir: str) -> str:
+    """Return the best stage to resume from given an existing run directory.
+
+    Walks backward through stage checkpoints to find the last completed stage
+    and returns the *next* stage.  Special-case: if review artifacts exist but
+    none passed, returns ``'review'`` so the loop is re-run rather than jumping
+    ahead to infrastructure.
+    """
+    def _exists(name: str) -> bool:
+        return os.path.exists(os.path.join(run_dir, name))
+
+    if _exists("05b_testing_infrastructure.json"):
+        return "testing"          # resume at final testing (step 8)
+    if _exists("06b_infrastructure_apply_artifact.json"):
+        return "testing"
+    if _exists("04_review_artifact_iter1.json"):
+        # Check whether any review iteration passed
+        for rf in sorted(glob.glob(os.path.join(run_dir, "04_review_artifact_iter*.json"))):
+            try:
+                with open(rf) as _fh:
+                    if json.load(_fh).get("passed"):
+                        return "infrastructure"
+            except Exception:
+                pass
+        return "review"  # review ran but never passed — re-run it
+    if _exists("03_engineering_artifact.json"):
+        return "review"
+    if _exists("04_generated_spec_artifact.json"):
+        return "engineering"
+    if _exists("02_architecture_artifact.json"):
+        return "spec"
+    if _exists("01_discovery_artifact.json"):
+        return "architecture"
+    return "discovery"
 
 
 class PipelineHaltError(Exception):
@@ -149,20 +199,154 @@ class Pipeline:
         self.review_agent = ReviewAgent(artifacts_dir)
         self.testing_agent = TestingAgent(artifacts_dir, generated_dir_name=project_name)
 
+    @classmethod
+    def load_checkpoint(
+        cls, run_dir: str, from_stage: Optional[str] = None
+    ) -> tuple:
+        """Load saved artifacts from *run_dir* into a :class:`PipelineResult`.
+
+        Only loads artifacts for stages that come **before** *from_stage* so the
+        pipeline re-runs everything from *from_stage* onwards with fresh LLM
+        calls.  Pass ``from_stage=None`` to load all available artifacts.
+
+        Returns ``(PipelineResult, project_name_str)``.
+        """
+        if from_stage and from_stage not in _STAGE_ORDER:
+            raise ValueError(
+                f"Unknown resume stage: {from_stage!r}. Valid: {_STAGE_ORDER}"
+            )
+        cutoff = _STAGE_ORDER.index(from_stage) if from_stage else len(_STAGE_ORDER)
+
+        def _load(filename: str, model_cls: type) -> Any:
+            path = os.path.join(run_dir, filename)
+            if not os.path.exists(path):
+                return None
+            try:
+                with open(path) as fh:
+                    return model_cls(**json.load(fh))
+            except Exception as exc:
+                console.print(
+                    f"[yellow]⚠  checkpoint: could not load {filename}: {exc}[/yellow]"
+                )
+                return None
+
+        def _before(stage: str) -> bool:
+            return _STAGE_ORDER.index(stage) < cutoff
+
+        # Read project name from the pipeline report
+        project_name = "generated"
+        report_path = os.path.join(run_dir, "00_pipeline_report.json")
+        if os.path.exists(report_path):
+            try:
+                with open(report_path) as fh:
+                    project_name = json.load(fh).get("project_name", "generated")
+            except Exception:
+                pass
+
+        result = PipelineResult(
+            requirements="",
+            started_at=datetime.now().isoformat(),
+            artifacts_dir=run_dir,
+        )
+
+        if _before("discovery"):
+            result.intent = _load("01_discovery_artifact.json", DiscoveryArtifact)
+            if result.intent:
+                result.requirements = result.intent.raw_requirements
+
+        if _before("architecture"):
+            result.architecture      = _load("02_architecture_artifact.json", ArchitectureArtifact)
+            result.test_architecture = _load("05a_testing_architecture.json", TestingArtifact)
+
+        if _before("spec"):
+            result.generated_spec = _load("04_generated_spec_artifact.json", GeneratedSpecArtifact)
+
+        if _before("engineering"):
+            result.engineering = _load("03_engineering_artifact.json", EngineeringArtifact)
+            result.infra_plan  = _load("06a_infrastructure_plan_artifact.json", InfrastructureArtifact)
+
+        if _before("review"):
+            for rf in sorted(glob.glob(os.path.join(run_dir, "04_review_artifact_iter*.json"))):
+                try:
+                    with open(rf) as fh:
+                        result.review_iterations.append(ReviewArtifact(**json.load(fh)))
+                except Exception as exc:
+                    console.print(
+                        f"[yellow]⚠  checkpoint: could not load "
+                        f"{os.path.basename(rf)}: {exc}[/yellow]"
+                    )
+
+        if _before("infrastructure"):
+            result.infra_apply = _load("06b_infrastructure_apply_artifact.json", InfrastructureArtifact)
+            result.deployment  = _load("07_deployment_artifact.json", DeploymentArtifact)
+
+        if _before("testing"):
+            result.test_infrastructure = _load("05b_testing_infrastructure.json", TestingArtifact)
+            result.test_review         = _load("05c_testing_review.json", TestingArtifact)
+
+        loaded = [s for s in [
+            "discovery"    if result.intent              else None,
+            "architecture" if result.architecture        else None,
+            "spec"         if result.generated_spec      else None,
+            "engineering"  if result.engineering         else None,
+            "infra_plan"   if result.infra_plan          else None,
+            "review(s)"    if result.review_iterations   else None,
+            "infra_apply"  if result.infra_apply         else None,
+            "test_infra"   if result.test_infrastructure else None,
+        ] if s]
+        console.print(Panel(
+            f"[bold]Resuming from stage:[/bold] [cyan]{from_stage or 'auto'}[/cyan]\n\n"
+            f"Loaded from      : {run_dir}\n"
+            f"Artifacts loaded : {', '.join(loaded) or 'none'}\n"
+            f"Project name     : {project_name}",
+            title="[yellow]♻  Checkpoint Resume[/yellow]",
+            border_style="yellow",
+        ))
+        return result, project_name
+
     async def run(
         self,
         requirements: str,
         spec: Optional[SpecArtifact] = None,
         existing_spec: Optional[SpecArtifact] = None,
+        resume_from_stage: Optional[str] = None,
+        checkpoint: Optional[PipelineResult] = None,
     ) -> PipelineResult:
-        result = PipelineResult(
-            requirements=requirements,
-            started_at=datetime.now().isoformat(),
-            artifacts_dir=self.artifacts_dir,
-        )
+        # ── Resume support ──────────────────────────────────────────────────
+        if resume_from_stage and resume_from_stage not in _STAGE_ORDER:
+            raise ValueError(
+                f"Unknown resume stage: {resume_from_stage!r}. "
+                f"Valid stages: {_STAGE_ORDER}"
+            )
+        _rfsi = _STAGE_ORDER.index(resume_from_stage) if resume_from_stage else -1
 
+        def _skip(stage: str) -> bool:
+            """True if this stage should be skipped (checkpoint already has it)."""
+            if resume_from_stage is None or checkpoint is None:
+                return False
+            try:
+                return _STAGE_ORDER.index(stage) < _rfsi
+            except ValueError:
+                return False
+
+        if checkpoint:
+            result = checkpoint
+            result.artifacts_dir = self.artifacts_dir
+            if not result.requirements and requirements:
+                result.requirements = requirements
+            result.started_at = datetime.now().isoformat()
+            result.completed_at = None
+            result.errors = []
+        else:
+            result = PipelineResult(
+                requirements=requirements,
+                started_at=datetime.now().isoformat(),
+                artifacts_dir=self.artifacts_dir,
+            )
+
+        _action = f"Resuming from '{resume_from_stage}'" if resume_from_stage else "Starting"
         console.print(Panel(
-            "[bold]🚀 LLM SDLC Workflow Starting[/bold]\n\n"
+            f"[bold]🚀 LLM SDLC Workflow {_action}[/bold]\n\n"
             "Discovery → Architecture → [Test] → Spec → "
             "[Engineering ‖ Infrastructure] → "
             "Review loop (max " + str(MAX_REVIEW_ITERATIONS) + ") → "
@@ -174,30 +358,38 @@ class Pipeline:
 
         try:
             # ── Step 1: Discovery ──────────────────────────────────────────────
-            self._step_header("Step 1", "Discovery Agent", "Analysing requirements, goals, constraints and risks")
-            result.intent = await self.discovery_agent.run(requirements)
-            self._step_done("Discovery", len(result.intent.requirements), "requirements extracted")
-            await self._await_human(
-                checkpoint="Checkpoint 1 — Requirements Validated",
-                details=[
-                    f"Requirements extracted : {len(result.intent.requirements)}",
-                    f"Goals identified       : {len(result.intent.user_goals)}",
-                    f"Constraints            : {len(result.intent.constraints)}",
-                    f"Risks surfaced         : {len(result.intent.risks)}",
-                    f"Scope                  : {result.intent.scope[:120]}{'...' if len(result.intent.scope) > 120 else ''}",
-                    "",
-                    "Top requirements:",
-                    *[f"  · {r[:100]}" for r in result.intent.requirements[:4]],
-                ],
-                artifact_path=os.path.join(self.artifacts_dir, "01_discovery_artifact.json"),
-                edit_hint="If requirements were misunderstood, update your requirements file and restart.",
-            )
+            if _skip("discovery") and result.intent:
+                console.print("[dim]⏭  Resuming past Discovery (loaded from checkpoint).[/dim]")
+            else:
+                self._step_header("Step 1", "Discovery Agent", "Analysing requirements, goals, constraints and risks")
+                result.intent = await self.discovery_agent.run(requirements)
+                self._step_done("Discovery", len(result.intent.requirements), "requirements extracted")
+                await self._await_human(
+                    checkpoint="Checkpoint 1 — Requirements Validated",
+                    details=[
+                        f"Requirements extracted : {len(result.intent.requirements)}",
+                        f"Goals identified       : {len(result.intent.user_goals)}",
+                        f"Constraints            : {len(result.intent.constraints)}",
+                        f"Risks surfaced         : {len(result.intent.risks)}",
+                        f"Scope                  : {result.intent.scope[:120]}{'...' if len(result.intent.scope) > 120 else ''}",
+                        "",
+                        "Top requirements:",
+                        *[f"  · {r[:100]}" for r in result.intent.requirements[:4]],
+                    ],
+                    artifact_path=os.path.join(self.artifacts_dir, "01_discovery_artifact.json"),
+                    edit_hint="If requirements were misunderstood, update your requirements file and restart.",
+                )
             # ── Step 2: Architecture fix loop ──────────────────────────────────
             # Runs Architecture Agent → Testing Stage 1 repeatedly until the
             # architecture is clean (no blocking issues) or MAX_ARCH_ITERATIONS hit.
             # Human can force another iteration (r) or stop the loop early (f).
             _arch_test_feedback: Optional[TestingArtifact] = None
             for _arch_iter in range(1, MAX_ARCH_ITERATIONS + 1):
+                # Resume guard: skip entire loop if checkpoint has arch + test_architecture
+                if _skip("architecture") and result.architecture and result.test_architecture:
+                    if _arch_iter == 1:
+                        console.print("[dim]⏭  Resuming past Architecture fix loop (loaded from checkpoint).[/dim]")
+                    break
                 _redesign_sfx = (
                     f" (re-design {_arch_iter}/{MAX_ARCH_ITERATIONS})"
                     if _arch_iter > 1 else ""
@@ -291,64 +483,75 @@ class Pipeline:
 
             # ── Step 3: Spec Agent — forward contract ───────────────────────
             # Runs after architecture is locked in by the fix loop above.
-            self._step_header("Step 3", "Spec Agent", "Generating forward contract (OpenAPI + DDL)")
-            result.generated_spec = await self.spec_agent.run(
-                result.intent, result.architecture, existing_spec
-            )
-            services = ", ".join(result.generated_spec.monorepo_services)
-            ports = ", ".join(
-                f"{s}:{p}" for s, p in result.generated_spec.service_ports.items()
-            )
-            self._step_done(
-                "Spec", len(result.generated_spec.generated_spec_files),
-                f"spec files — services: [{services}]  ports: {ports}"
-            )
+            if _skip("spec") and result.generated_spec:
+                console.print("[dim]⏭  Resuming past Spec (loaded from checkpoint).[/dim]")
+            else:
+                self._step_header("Step 3", "Spec Agent", "Generating forward contract (OpenAPI + DDL)")
+                result.generated_spec = await self.spec_agent.run(
+                    result.intent, result.architecture, existing_spec
+                )
+                services = ", ".join(result.generated_spec.monorepo_services)
+                ports = ", ".join(
+                    f"{s}:{p}" for s, p in result.generated_spec.service_ports.items()
+                )
+                self._step_done(
+                    "Spec", len(result.generated_spec.generated_spec_files),
+                    f"spec files — services: [{services}]  ports: {ports}"
+                )
 
-            _spec_dir = os.path.join(self.artifacts_dir, self.project_name, "specs")
-            _openapi_lines = len((result.generated_spec.openapi_spec or "").splitlines())
-            _schema_lines  = len((result.generated_spec.database_schema or "").splitlines())
-            _shared = ", ".join(result.generated_spec.shared_models[:6]) or "none"
-            await self._await_human(
-                checkpoint="Checkpoint 2 — Architecture & API Contract Approved  [MOST CRITICAL]",
-                details=[
-                    f"Architecture style : {result.architecture.architecture_style}",
-                    f"Components         : {len(result.architecture.components)}",
-                    f"Services           : {', '.join(result.generated_spec.monorepo_services)}",
-                    f"Ports              : {ports}",
-                    f"OpenAPI spec       : {_openapi_lines} lines  →  {_spec_dir}/openapi.yaml",
-                    f"SQL schema         : {_schema_lines} lines  →  {_spec_dir}/schema.sql",
-                    f"Shared models      : {_shared}",
-                ],
-                artifact_path=os.path.join(self.artifacts_dir, "04_generated_spec_artifact.json"),
-                edit_hint=(
-                    "This is the public contract. Edit openapi.yaml + schema.sql freely.\n"
-                    "  Engineering will implement exactly what is in those files.\n"
-                    "  Once downstream teams depend on these paths, changes are expensive."
-                ),
-            )
+                _spec_dir = os.path.join(self.artifacts_dir, self.project_name, "specs")
+                _openapi_lines = len((result.generated_spec.openapi_spec or "").splitlines())
+                _schema_lines  = len((result.generated_spec.database_schema or "").splitlines())
+                _shared = ", ".join(result.generated_spec.shared_models[:6]) or "none"
+                await self._await_human(
+                    checkpoint="Checkpoint 2 — Architecture & API Contract Approved  [MOST CRITICAL]",
+                    details=[
+                        f"Architecture style : {result.architecture.architecture_style}",
+                        f"Components         : {len(result.architecture.components)}",
+                        f"Services           : {', '.join(result.generated_spec.monorepo_services)}",
+                        f"Ports              : {ports}",
+                        f"OpenAPI spec       : {_openapi_lines} lines  →  {_spec_dir}/openapi.yaml",
+                        f"SQL schema         : {_schema_lines} lines  →  {_spec_dir}/schema.sql",
+                        f"Shared models      : {_shared}",
+                    ],
+                    artifact_path=os.path.join(self.artifacts_dir, "04_generated_spec_artifact.json"),
+                    edit_hint=(
+                        "This is the public contract. Edit openapi.yaml + schema.sql freely.\n"
+                        "  Engineering will implement exactly what is in those files.\n"
+                        "  Once downstream teams depend on these paths, changes are expensive."
+                    ),
+                )
 
             # ── Step 5: Engineering + Infrastructure plan in PARALLEL ───────
-            self._step_header(
-                "Step 5", "Engineering + Infrastructure",
-                "Generating code and IaC in parallel (Kotlin/React + Docker)"
-            )
-            result.engineering, result.infra_plan = await asyncio.gather(
-                self.engineering_agent.run(result.intent, result.architecture, result.generated_spec),
-                self.infrastructure_agent.run(
-                    result.intent, result.architecture,
-                    EngineeringArtifact(),
-                    skip_start=True,
-                ),
-            )
-            self._step_done("Engineering", len(result.engineering.generated_files), "files generated")
-            self._step_done(
-                "Infrastructure (plan)", len(result.infra_plan.iac_files),
-                "IaC files written (containers start after review loop)"
-            )
+            if _skip("engineering") and result.engineering and result.infra_plan:
+                console.print("[dim]⏭  Resuming past Engineering + Infra plan (loaded from checkpoint).[/dim]")
+            else:
+                self._step_header(
+                    "Step 5", "Engineering + Infrastructure",
+                    "Generating code and IaC in parallel (Kotlin/React + Docker)"
+                )
+                result.engineering, result.infra_plan = await asyncio.gather(
+                    self.engineering_agent.run(result.intent, result.architecture, result.generated_spec),
+                    self.infrastructure_agent.run(
+                        result.intent, result.architecture,
+                        EngineeringArtifact(),
+                        skip_start=True,
+                    ),
+                )
+                self._step_done("Engineering", len(result.engineering.generated_files), "files generated")
+                self._step_done(
+                    "Infrastructure (plan)", len(result.infra_plan.iac_files),
+                    "IaC files written (containers start after review loop)"
+                )
 
             # ── Step 6: Review loop ─────────────────────────────────────────
             previous_feedback = None
             for iteration in range(1, MAX_REVIEW_ITERATIONS + 1):
+                # Resume guard: skip entire loop if checkpoint already has review iterations
+                if _skip("review") and result.review_iterations:
+                    if iteration == 1:
+                        console.print("[dim]⏭  Resuming past Review loop (loaded from checkpoint).[/dim]")
+                    break
                 self._step_header(
                     f"Step 6 (iter {iteration})", "Review Agent",
                     f"Reviewing code + IaC — iteration {iteration}/{MAX_REVIEW_ITERATIONS}"
@@ -440,15 +643,15 @@ class Pipeline:
                         "Continuing with best effort.[/red]\n"
                     )
 
-            # Halt if review still failing after max iterations
-            if result.review and not result.review.passed:
+            # Halt if review still failing after max iterations (skip when resuming past review)
+            if not _skip("review") and result.review and not result.review.passed:
                 crit = result.review.critical_issues
                 raise PipelineHaltError(
                     f"Review failed after {MAX_REVIEW_ITERATIONS} iteration(s). "
                     f"Unresolved critical issues: {crit or '[none flagged]'}"
                 )
 
-            if result.review:
+            if not _skip("review") and result.review:
                 _crit = result.review.critical_issues
                 _high = result.review.high_issues
                 _review_status = "✅ Passed" if result.review.passed else "⚠️  Did not fully pass"
@@ -469,206 +672,51 @@ class Pipeline:
                 )
 
             # ── Step 7: Start containers + generate CI/CD package (parallel) ──
-            self._step_header(
-                "Step 7", "Infrastructure + Deployment Agent",
-                "Building containers and generating CI/CD + K8s/Helm package in parallel"
-            )
-            result.infra_apply, result.deployment = await asyncio.gather(
-                self.infrastructure_agent.run(
-                    intent=result.intent,
-                    architecture=result.architecture,
-                    engineering=result.engineering,
-                ),
-                self.deployment_agent.run(
-                    intent=result.intent,
-                    architecture=result.architecture,
-                    engineering=result.engineering,
-                    contract=result.generated_spec,
-                    iteration=result.engineering.review_iteration,
-                ),
-            )
-            if result.infra_apply.container_running:
-                self._step_done(
-                    "Infrastructure (apply)",
-                    len(result.infra_apply.iac_files),
-                    f"service live at {result.infra_apply.base_url}",
-                )
+            if _skip("infrastructure") and result.infra_apply:
+                console.print("[dim]⏭  Resuming past Infrastructure apply (loaded from checkpoint).[/dim]")
             else:
-                self._step_done(
-                    "Infrastructure (apply)",
-                    len(result.infra_apply.iac_files),
-                    "IaC files written (container not running — live tests skipped)",
+                self._step_header(
+                    "Step 7", "Infrastructure + Deployment Agent",
+                    "Building containers and generating CI/CD + K8s/Helm package in parallel"
                 )
-            self._step_done(
-                "Deployment",
-                len(result.deployment.deployment_files),
-                f"CI/CD + K8s/Helm files ({result.deployment.deployment_strategy} strategy)",
-            )
-
-            self._step_header(
-                "Step 7b", "Testing Agent",
-                "Live HTTP tests + Cypress e2e spec generation"
-            )
-            result.test_infrastructure = await self.testing_agent.run(
-                stage="infrastructure",
-                intent=result.intent,
-                architecture=result.architecture,
-                engineering=result.engineering,
-                infrastructure=result.infra_apply,
-            )
-            self._testing_status("Infrastructure (live + Cypress)", result.test_infrastructure)
-
-            # ── Stage-2 retry loop for failed services ───────────────────────
-            # Human can inspect the initial Stage-2 result before any retry begins.
-            _infra_force_retry = False  # True → enter retry even when initial test passed
-            _infra_stopped = False       # True → human pressed f to exit the loop early
-
-            _init_blockers = result.test_infrastructure.blocking_issues
-            _init_failed   = result.test_infrastructure.failed_services
-            if result.test_infrastructure.passed:
-                _idecision = await self._await_human(
-                    checkpoint="✅ Infrastructure Tests Passed (Stage 2)",
-                    details=[
-                        f"HTTP passed : {sum(1 for t in result.test_infrastructure.http_test_cases if t.status == 'passed')}/{len(result.test_infrastructure.http_test_cases)}",
-                        f"Cypress     : {len(result.test_infrastructure.cypress_spec_files)} spec(s)",
-                        "Blockers    : 0",
-                        "",
-                        "↵ Enter — continue to final testing",
-                        "r — force a service re-run",
-                    ],
-                    artifact_path=os.path.join(self.artifacts_dir, "07b_testing_infra.json"),
-                    loop_controls=True,
+                result.infra_apply, result.deployment = await asyncio.gather(
+                    self.infrastructure_agent.run(
+                        intent=result.intent,
+                        architecture=result.architecture,
+                        engineering=result.engineering,
+                    ),
+                    self.deployment_agent.run(
+                        intent=result.intent,
+                        architecture=result.architecture,
+                        engineering=result.engineering,
+                        contract=result.generated_spec,
+                        iteration=result.engineering.review_iteration,
+                    ),
                 )
-                if _idecision == HumanDecision.FORCE_LOOP:
-                    console.print(
-                        "[yellow]🔄 Human requested infrastructure service re-run…[/yellow]\n"
+                if result.infra_apply.container_running:
+                    self._step_done(
+                        "Infrastructure (apply)",
+                        len(result.infra_apply.iac_files),
+                        f"service live at {result.infra_apply.base_url}",
                     )
-                    _infra_force_retry = True
-            else:
-                _idecision = await self._await_human(
-                    checkpoint="❌ Infrastructure Tests Failed (Stage 2)",
-                    details=[
-                        f"Failed svcs : {', '.join(_init_failed) or 'n/a'}",
-                        f"Blockers    : {len(_init_blockers)}",
-                        *[f"  ⛔ {b[:100]}" for b in _init_blockers[:5]],
-                        "",
-                        "↵ Enter — auto-retry failed services",
-                        "f — stop retry loop and continue with current state",
-                        "a — abort pipeline",
-                    ],
-                    artifact_path=os.path.join(self.artifacts_dir, "07b_testing_infra.json"),
-                    loop_controls=True,
-                )
-                if _idecision == HumanDecision.STOP_LOOP:
-                    console.print(
-                        "[yellow]⏩ Human stopped infra retry loop — "
-                        "continuing with current state.[/yellow]\n"
-                    )
-                    _infra_stopped = True
-
-            for _retry in range(1, MAX_INFRA_TEST_RETRIES + 1):
-                if _infra_stopped:
-                    break
-                if result.test_infrastructure.passed and not _infra_force_retry:
-                    break
-                _was_forced = _infra_force_retry
-                _infra_force_retry = False  # consume one-shot flag
-                failed_svcs = result.test_infrastructure.failed_services
-                if not failed_svcs and not _was_forced:
-                    break   # no specific services to target — don't retry blindly
-                console.print(
-                    f"[yellow]🔄 Stage-2 retry {_retry}/{MAX_INFRA_TEST_RETRIES} — "
-                    f"re-generating failed services: {failed_svcs}…[/yellow]"
-                )
-                result.engineering = await self.engineering_agent.run(
-                    result.intent, result.architecture, result.generated_spec,
-                    iteration=result.engineering.review_iteration + 1,
-                )
-                result.infra_apply = await self.infrastructure_agent.run(
-                    intent=result.intent,
-                    architecture=result.architecture,
-                    engineering=result.engineering,
-                )
-                result.test_infrastructure = await self.testing_agent.run(
-                    stage="infrastructure",
-                    intent=result.intent,
-                    architecture=result.architecture,
-                    engineering=result.engineering,
-                    infrastructure=result.infra_apply,
-                )
-                self._testing_status(
-                    f"Infrastructure retry {_retry} (live + Cypress)",
-                    result.test_infrastructure,
-                )
-                # Human checkpoint after each retry result
-                _retry_blockers = result.test_infrastructure.blocking_issues
-                _retry_failed   = result.test_infrastructure.failed_services
-                if result.test_infrastructure.passed:
-                    _idecision = await self._await_human(
-                        checkpoint=f"✅ Infrastructure Tests Passed (retry {_retry})",
-                        details=[
-                            f"HTTP passed : {sum(1 for t in result.test_infrastructure.http_test_cases if t.status == 'passed')}/{len(result.test_infrastructure.http_test_cases)}",
-                            f"Cypress     : {len(result.test_infrastructure.cypress_spec_files)} spec(s)",
-                            "",
-                            "↵ Enter — continue to final testing",
-                            "r — force another service re-run",
-                        ],
-                        artifact_path=os.path.join(
-                            self.artifacts_dir, f"07b_testing_infra_retry{_retry}.json"
-                        ),
-                        loop_controls=True,
-                    )
-                    if _idecision == HumanDecision.FORCE_LOOP and _retry < MAX_INFRA_TEST_RETRIES:
-                        console.print(
-                            "[yellow]🔄 Human requested another infrastructure re-run…[/yellow]\n"
-                        )
-                        _infra_force_retry = True
-                        continue
-                    break  # tests clean — exit loop
                 else:
-                    _idecision = await self._await_human(
-                        checkpoint=(
-                            f"❌ Infrastructure Tests Still Failing"
-                            f" (retry {_retry}/{MAX_INFRA_TEST_RETRIES})"
-                        ),
-                        details=[
-                            f"Failed svcs : {', '.join(_retry_failed) or 'n/a'}",
-                            f"Blockers    : {len(_retry_blockers)}",
-                            *[f"  ⛔ {b[:100]}" for b in _retry_blockers[:5]],
-                            "",
-                            *(["↵ Enter — retry again"] if _retry < MAX_INFRA_TEST_RETRIES
-                              else ["↵ Enter — continue with failures (best effort)"]),
-                            "f — stop retry loop and continue with current state",
-                            "a — abort pipeline",
-                        ],
-                        artifact_path=os.path.join(
-                            self.artifacts_dir, f"07b_testing_infra_retry{_retry}.json"
-                        ),
-                        loop_controls=True,
+                    self._step_done(
+                        "Infrastructure (apply)",
+                        len(result.infra_apply.iac_files),
+                        "IaC files written (container not running — live tests skipped)",
                     )
-                    if _idecision == HumanDecision.STOP_LOOP:
-                        console.print(
-                            "[yellow]⏩ Human stopped infra retry loop — "
-                            "continuing with current state.[/yellow]\n"
-                        )
-                        _infra_stopped = True
-                        break
-                    if _retry < MAX_INFRA_TEST_RETRIES:
-                        console.print(
-                            f"[yellow]🔄 Infrastructure failures remain — retrying "
-                            f"({_retry + 1}/{MAX_INFRA_TEST_RETRIES})…[/yellow]\n"
-                        )
-                    else:
-                        console.print(
-                            f"[red]⚠  Max infra retries ({MAX_INFRA_TEST_RETRIES}) reached. "
-                            "Continuing with best effort.[/red]\n"
-                        )
+                self._step_done(
+                    "Deployment",
+                    len(result.deployment.deployment_files),
+                    f"CI/CD + K8s/Helm files ({result.deployment.deployment_strategy} strategy)",
+                )
+
+            # ── Step 7b: Infrastructure testing + Stage-2 retry loop ────────
+            if _skip("testing") and result.test_infrastructure is not None:
+                console.print("[dim]⏭  Resuming past Infrastructure testing (loaded from checkpoint).[/dim]")
             else:
-                if not result.test_infrastructure.passed and not _infra_stopped:
-                    raise PipelineHaltError(
-                        f"Infrastructure tests still failing after {MAX_INFRA_TEST_RETRIES} "
-                        f"retries. Blocking: {result.test_infrastructure.blocking_issues}"
-                    )
+                await self._run_infra_testing_loop(result)
+
 
             # ── Step 8: Final testing ────────────────────────────────────────
             self._step_header("Step 8", "Testing Agent", "Final verification")
@@ -691,6 +739,172 @@ class Pipeline:
         result.completed_at = datetime.now().isoformat()
         self._save_report(result)
         return result
+
+    async def _run_infra_testing_loop(self, result: PipelineResult) -> None:
+        """Step 7b: Live HTTP tests + Stage-2 service retry loop (extracted for resume support)."""
+        self._step_header(
+            "Step 7b", "Testing Agent",
+            "Live HTTP tests + Cypress e2e spec generation"
+        )
+        result.test_infrastructure = await self.testing_agent.run(
+            stage="infrastructure",
+            intent=result.intent,
+            architecture=result.architecture,
+            engineering=result.engineering,
+            infrastructure=result.infra_apply,
+        )
+        self._testing_status("Infrastructure (live + Cypress)", result.test_infrastructure)
+
+        # ── Stage-2 retry loop for failed services ────────────────────────
+        # Human can inspect the initial Stage-2 result before any retry begins.
+        _infra_force_retry = False  # True → enter retry even when initial test passed
+        _infra_stopped = False       # True → human pressed f to exit the loop early
+
+        _init_blockers = result.test_infrastructure.blocking_issues
+        _init_failed   = result.test_infrastructure.failed_services
+        if result.test_infrastructure.passed:
+            _idecision = await self._await_human(
+                checkpoint="✅ Infrastructure Tests Passed (Stage 2)",
+                details=[
+                    f"HTTP passed : {sum(1 for t in result.test_infrastructure.http_test_cases if t.status == 'passed')}/{len(result.test_infrastructure.http_test_cases)}",
+                    f"Cypress     : {len(result.test_infrastructure.cypress_spec_files)} spec(s)",
+                    "Blockers    : 0",
+                    "",
+                    "↵ Enter — continue to final testing",
+                    "r — force a service re-run",
+                ],
+                artifact_path=os.path.join(self.artifacts_dir, "07b_testing_infra.json"),
+                loop_controls=True,
+            )
+            if _idecision == HumanDecision.FORCE_LOOP:
+                console.print(
+                    "[yellow]🔄 Human requested infrastructure service re-run…[/yellow]\n"
+                )
+                _infra_force_retry = True
+        else:
+            _idecision = await self._await_human(
+                checkpoint="❌ Infrastructure Tests Failed (Stage 2)",
+                details=[
+                    f"Failed svcs : {', '.join(_init_failed) or 'n/a'}",
+                    f"Blockers    : {len(_init_blockers)}",
+                    *[f"  ⛔ {b[:100]}" for b in _init_blockers[:5]],
+                    "",
+                    "↵ Enter — auto-retry failed services",
+                    "f — stop retry loop and continue with current state",
+                    "a — abort pipeline",
+                ],
+                artifact_path=os.path.join(self.artifacts_dir, "07b_testing_infra.json"),
+                loop_controls=True,
+            )
+            if _idecision == HumanDecision.STOP_LOOP:
+                console.print(
+                    "[yellow]⏩ Human stopped infra retry loop — "
+                    "continuing with current state.[/yellow]\n"
+                )
+                _infra_stopped = True
+
+        for _retry in range(1, MAX_INFRA_TEST_RETRIES + 1):
+            if _infra_stopped:
+                break
+            if result.test_infrastructure.passed and not _infra_force_retry:
+                break
+            _was_forced = _infra_force_retry
+            _infra_force_retry = False  # consume one-shot flag
+            failed_svcs = result.test_infrastructure.failed_services
+            if not failed_svcs and not _was_forced:
+                break   # no specific services to target — don't retry blindly
+            console.print(
+                f"[yellow]🔄 Stage-2 retry {_retry}/{MAX_INFRA_TEST_RETRIES} — "
+                f"re-generating failed services: {failed_svcs}…[/yellow]"
+            )
+            result.engineering = await self.engineering_agent.run(
+                result.intent, result.architecture, result.generated_spec,
+                iteration=result.engineering.review_iteration + 1,
+            )
+            result.infra_apply = await self.infrastructure_agent.run(
+                intent=result.intent,
+                architecture=result.architecture,
+                engineering=result.engineering,
+            )
+            result.test_infrastructure = await self.testing_agent.run(
+                stage="infrastructure",
+                intent=result.intent,
+                architecture=result.architecture,
+                engineering=result.engineering,
+                infrastructure=result.infra_apply,
+            )
+            self._testing_status(
+                f"Infrastructure retry {_retry} (live + Cypress)",
+                result.test_infrastructure,
+            )
+            _retry_blockers = result.test_infrastructure.blocking_issues
+            _retry_failed   = result.test_infrastructure.failed_services
+            if result.test_infrastructure.passed:
+                _idecision = await self._await_human(
+                    checkpoint=f"✅ Infrastructure Tests Passed (retry {_retry})",
+                    details=[
+                        f"HTTP passed : {sum(1 for t in result.test_infrastructure.http_test_cases if t.status == 'passed')}/{len(result.test_infrastructure.http_test_cases)}",
+                        f"Cypress     : {len(result.test_infrastructure.cypress_spec_files)} spec(s)",
+                        "",
+                        "↵ Enter — continue to final testing",
+                        "r — force another service re-run",
+                    ],
+                    artifact_path=os.path.join(
+                        self.artifacts_dir, f"07b_testing_infra_retry{_retry}.json"
+                    ),
+                    loop_controls=True,
+                )
+                if _idecision == HumanDecision.FORCE_LOOP and _retry < MAX_INFRA_TEST_RETRIES:
+                    console.print(
+                        "[yellow]🔄 Human requested another infrastructure re-run…[/yellow]\n"
+                    )
+                    _infra_force_retry = True
+                    continue
+                break  # tests clean — exit loop
+            else:
+                _idecision = await self._await_human(
+                    checkpoint=(
+                        f"❌ Infrastructure Tests Still Failing"
+                        f" (retry {_retry}/{MAX_INFRA_TEST_RETRIES})"
+                    ),
+                    details=[
+                        f"Failed svcs : {', '.join(_retry_failed) or 'n/a'}",
+                        f"Blockers    : {len(_retry_blockers)}",
+                        *[f"  ⛔ {b[:100]}" for b in _retry_blockers[:5]],
+                        "",
+                        *([ "↵ Enter — retry again"] if _retry < MAX_INFRA_TEST_RETRIES
+                          else ["↵ Enter — continue with failures (best effort)"]),
+                        "f — stop retry loop and continue with current state",
+                        "a — abort pipeline",
+                    ],
+                    artifact_path=os.path.join(
+                        self.artifacts_dir, f"07b_testing_infra_retry{_retry}.json"
+                    ),
+                    loop_controls=True,
+                )
+                if _idecision == HumanDecision.STOP_LOOP:
+                    console.print(
+                        "[yellow]⏩ Human stopped infra retry loop — "
+                        "continuing with current state.[/yellow]\n"
+                    )
+                    _infra_stopped = True
+                    break
+                if _retry < MAX_INFRA_TEST_RETRIES:
+                    console.print(
+                        f"[yellow]🔄 Infrastructure failures remain — retrying "
+                        f"({_retry + 1}/{MAX_INFRA_TEST_RETRIES})…[/yellow]\n"
+                    )
+                else:
+                    console.print(
+                        f"[red]⚠  Max infra retries ({MAX_INFRA_TEST_RETRIES}) reached. "
+                        "Continuing with best effort.[/red]\n"
+                    )
+        else:
+            if not result.test_infrastructure.passed and not _infra_stopped:
+                raise PipelineHaltError(
+                    f"Infrastructure tests still failing after {MAX_INFRA_TEST_RETRIES} "
+                    f"retries. Blocking: {result.test_infrastructure.blocking_issues}"
+                )
 
     # ─── Display helpers ─────────────────────────────────────────────────────
 

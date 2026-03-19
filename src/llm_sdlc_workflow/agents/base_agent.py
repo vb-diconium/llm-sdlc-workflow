@@ -46,10 +46,15 @@ _LLM_SEMAPHORE: Optional[asyncio.Semaphore] = None
 
 
 def _get_semaphore() -> asyncio.Semaphore:
-    """Return the module-level semaphore, creating it on first call."""
+    """Return the module-level semaphore, creating it on first call.
+
+    Anthropic org limit is 10,000 output tokens/min — use concurrency=1
+    to serialise calls and avoid 429s.  GitHub Models allows 2 concurrent.
+    """
     global _LLM_SEMAPHORE
     if _LLM_SEMAPHORE is None:
-        _LLM_SEMAPHORE = asyncio.Semaphore(2)
+        _is_anthropic = "anthropic.com" in _BASE_URL
+        _LLM_SEMAPHORE = asyncio.Semaphore(1 if _is_anthropic else 2)
     return _LLM_SEMAPHORE
 
 
@@ -213,7 +218,8 @@ class BaseAgent:
                     )
                 for attempt in range(1, MAX_RETRIES + 1):
                     try:
-                        fill_raw = await self._raw_query(fill_system, fill_msg)
+                        # Single-file fill calls only need ~8k tokens max
+                        fill_raw = await self._raw_query(fill_system, fill_msg, max_tokens=8192)
                         content = self._extract_content_field(fill_raw)
                         if content:
                             file_list[i]["content"] = content
@@ -224,8 +230,10 @@ class BaseAgent:
                             file_list[i]["content"] = f"# TODO: generate {path}\n"
                         else:
                             await asyncio.sleep(RETRY_DELAY)
-                # Small pause between fill calls to spread burst traffic.
-                await asyncio.sleep(0.5)
+                # Pause between fill calls — longer for Anthropic to stay under
+                # the 10k output-tokens/min org rate limit.
+                _inter_call_delay = 2.0 if "anthropic.com" in _BASE_URL else 0.5
+                await asyncio.sleep(_inter_call_delay)
 
             data[key] = file_list
 
@@ -251,12 +259,12 @@ class BaseAgent:
                     await asyncio.sleep(RETRY_DELAY)
         raise last_err  # type: ignore
 
-    async def _raw_query(self, system: str, user_message: str) -> str:
-        """Single call to the GitHub Models API with json_object output.
+    async def _raw_query(self, system: str, user_message: str, max_tokens: int = 16384) -> str:
+        """Single call to the LLM API with json_object output.
 
-        Protected by a module-level asyncio.Semaphore(2) so that at most two
-        concurrent LLM calls are ever in flight across all agents, keeping the
-        pipeline within the GitHub Models free-tier concurrency limit.
+        Protected by a module-level asyncio.Semaphore so that at most N
+        concurrent LLM calls are ever in flight (N=1 for Anthropic, 2 otherwise).
+        Pass max_tokens=8192 for fill-phase calls that only generate one file.
         """
         client = _make_client()
         # Anthropic's OpenAI-compat endpoint does not support json_object —
@@ -274,7 +282,7 @@ class BaseAgent:
                     {"role": "system", "content": system},
                     {"role": "user",   "content": user_message},
                 ],
-                max_tokens=16384,
+                max_tokens=max_tokens,
                 **extra,
             )
         return response.choices[0].message.content or ""

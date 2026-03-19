@@ -43,7 +43,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from llm_sdlc_workflow.models.artifacts import SpecArtifact
-from llm_sdlc_workflow.pipeline import Pipeline
+from llm_sdlc_workflow.pipeline import Pipeline, _auto_detect_resume_stage
 from llm_sdlc_workflow.config import PipelineConfig, ComponentConfig, TechConfig
 
 console = Console()
@@ -115,6 +115,25 @@ Examples:
             "from generated/specs/ and passes them to the Spec Agent so the new run "
             "EXTENDS the existing contract instead of starting from scratch."
         )
+    )
+    parser.add_argument(
+        "--resume-from", metavar="DIR",
+        help=(
+            "Resume a previous pipeline run. Provide the run's artifacts directory "
+            "(e.g. artifacts/run_20260319_150134). The pipeline reloads completed "
+            "artifacts and re-runs from --resume-stage onwards. If --resume-stage is "
+            "omitted the stage is auto-detected from which artifacts are present."
+        ),
+    )
+    parser.add_argument(
+        "--resume-stage", metavar="STAGE",
+        choices=["discovery", "architecture", "spec", "engineering",
+                 "review", "infrastructure", "testing"],
+        help=(
+            "Stage to start from when using --resume-from. "
+            "Choices: discovery, architecture, spec, engineering, "
+            "review, infrastructure, testing. Auto-detected if omitted."
+        ),
     )
     parser.add_argument(
         "--auto", action="store_true",
@@ -451,7 +470,26 @@ def get_requirements(args: argparse.Namespace) -> str:
 
 async def async_main(args: argparse.Namespace, requirements: str, spec, existing_spec) -> int:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    artifacts_dir = args.output_dir or os.path.join("artifacts", f"run_{timestamp}")
+    resume_from = getattr(args, "resume_from", None)
+    resume_stage = getattr(args, "resume_stage", None)
+    checkpoint = None
+
+    if resume_from:
+        if not os.path.isdir(resume_from):
+            console.print(f"[red]--resume-from: directory not found: {resume_from}[/red]")
+            return 1
+        if resume_stage is None:
+            resume_stage = _auto_detect_resume_stage(resume_from)
+            console.print(f"[dim]Auto-detected resume stage: [cyan]{resume_stage}[/cyan][/dim]")
+        checkpoint, _chk_project = Pipeline.load_checkpoint(resume_from, resume_stage)
+        artifacts_dir = args.output_dir or resume_from   # reuse same run dir
+        if not getattr(args, "project_name", None):
+            args.project_name = _chk_project
+        if not requirements and checkpoint.requirements:
+            requirements = checkpoint.requirements
+    else:
+        artifacts_dir = args.output_dir or os.path.join("artifacts", f"run_{timestamp}")
+
     human_checkpoints = not getattr(args, "auto", False)
     project_name = _resolve_project_name(args)
 
@@ -501,7 +539,13 @@ async def async_main(args: argparse.Namespace, requirements: str, spec, existing
         project_name=project_name,
         config=pipeline_config,
     )
-    result = await pipeline.run(requirements, spec=spec, existing_spec=existing_spec)
+    result = await pipeline.run(
+        requirements,
+        spec=spec,
+        existing_spec=existing_spec,
+        resume_from_stage=resume_stage if resume_from else None,
+        checkpoint=checkpoint,
+    )
     pipeline.print_summary(result)
     return 0 if result.passed else 1
 
@@ -509,8 +553,13 @@ async def async_main(args: argparse.Namespace, requirements: str, spec, existing
 def main() -> int:
     args = parse_args()
     _apply_config(args)
-    requirements = get_requirements(args)
-    if not requirements:
+    # When resuming, requirements can come from the checkpoint's discovery artifact
+    _resume_from = getattr(args, "resume_from", None)
+    if _resume_from and not getattr(args, "requirements", None) and not getattr(args, "interactive", False):
+        requirements = ""  # will be loaded from checkpoint in async_main
+    else:
+        requirements = get_requirements(args)
+    if not requirements and not _resume_from:
         console.print("[red]Error: No requirements provided.[/red]")
         return 1
 
