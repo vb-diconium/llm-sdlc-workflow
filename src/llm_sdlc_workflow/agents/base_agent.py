@@ -243,6 +243,106 @@ class BaseAgent:
             console.print(f"[red]Chunked parse error in {self.name}:[/red] {e}")
             raise
 
+    async def _patch_files_chunked(
+        self,
+        system: str,
+        existing_artifact: "BaseModel",
+        feedback: "ReviewFeedback",
+        model_class: Type[T],
+        file_keys: List[str],
+    ) -> T:
+        """Targeted patching mode for review feedback iterations.
+
+        Instead of regenerating all files from scratch, this method:
+        1. Preserves all non-file fields from the existing artifact (tech stack, env vars…)
+        2. For each file: sends the CURRENT content + specific review issues to the LLM
+        3. LLM produces a surgical fix rather than a full re-generation
+
+        This prevents the "random regeneration" problem where the LLM introduces new bugs
+        each review iteration because it cannot see the existing generated code.
+        """
+        from llm_sdlc_workflow.models.artifacts import ReviewFeedback as _RF
+        console.print(Rule(f"[bold yellow]{self.name} (patch)[/bold yellow]"))
+
+        # Collect all issues (critical + high) into one bullet list
+        all_issues = list(feedback.critical_issues) + list(feedback.high_issues)
+        issues_str = (
+            "\n".join(f"  - {i}" for i in all_issues)
+            if all_issues
+            else "  (general code-quality improvements)"
+        )
+
+        # Dump existing artifact → mutable dict, preserving all non-file fields
+        data: Dict = json.loads(existing_artifact.model_dump_json())
+
+        # Build path → existing content map before resetting to __PENDING__
+        content_map: Dict[str, str] = {}
+        for key in file_keys:
+            for fe in data.get(key, []):
+                path = fe.get("path", "")
+                content = fe.get("content", "")
+                if path and content and content.strip() not in ("__PENDING__", ""):
+                    content_map[path] = content
+                fe["content"] = "__PENDING__"
+
+        total = sum(len(data.get(k, [])) for k in file_keys)
+        console.print(
+            f"[dim]  Patching {total} files with targeted fixes (review iter {feedback.iteration})[/dim]"
+        )
+        _inter_call_delay = 2.0 if "anthropic.com" in _BASE_URL else 0.5
+
+        for key in file_keys:
+            file_list: List[Dict] = data.get(key, [])
+            for i, file_entry in enumerate(file_list):
+                path = file_entry.get("path", f"file_{i}")
+                purpose = file_entry.get("purpose", "")
+                existing_content = content_map.get(path, "")
+                console.print(f"[dim]  ✍  Patching: {path}[/dim]")
+
+                if existing_content:
+                    fill_msg = (
+                        f"Fix specific code-review issues in this existing file.\n\n"
+                        f"File: {path}\n"
+                        f"Purpose: {purpose}\n\n"
+                        f"## Issues to fix (from code review — address ALL of them):\n{issues_str}\n\n"
+                        f"## Existing file content (apply fixes, keep everything else intact):\n"
+                        f"```\n{existing_content[:6000]}\n```\n\n"
+                        "Output the COMPLETE corrected file. Do NOT truncate. No TODOs.\n"
+                        'Return JSON: {"content": "<full corrected file content>"}\nValid json.'
+                    )
+                else:
+                    fill_msg = (
+                        f"Generate COMPLETE content for this new file.\n\n"
+                        f"File: {path}\n"
+                        f"Purpose: {purpose}\n\n"
+                        f"## Known issues to avoid:\n{issues_str}\n\n"
+                        'Return JSON: {"content": "<full file content>"}\nNo TODOs. Valid json.'
+                    )
+
+                for attempt in range(1, MAX_RETRIES + 1):
+                    try:
+                        fill_raw = await self._raw_query(system, fill_msg, max_tokens=8192)
+                        content = self._extract_content_field(fill_raw)
+                        if content:
+                            file_list[i]["content"] = content
+                            break
+                    except Exception as e:
+                        if attempt == MAX_RETRIES:
+                            console.print(f"[yellow]  ⚠ Could not patch {path}: {e}[/yellow]")
+                            # Fall back to existing content — a known-broken file is better than __PENDING__
+                            file_list[i]["content"] = existing_content or f"# TODO: generate {path}\n"
+                        else:
+                            await asyncio.sleep(RETRY_DELAY)
+                await asyncio.sleep(_inter_call_delay)
+
+            data[key] = file_list
+
+        try:
+            return model_class(**data)
+        except Exception as e:
+            console.print(f"[red]Patch parse error in {self.name}:[/red] {e}")
+            raise
+
     async def _run_with_retry(self, system: str, user_message: str) -> str:
         """Run a single LLM call with up to MAX_RETRIES attempts."""
         last_err: Optional[Exception] = None

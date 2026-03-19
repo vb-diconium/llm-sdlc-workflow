@@ -31,11 +31,23 @@ class BffAgent(BaseAgent):
         contract: GeneratedSpecArtifact,
         review_feedback: Optional[ReviewFeedback] = None,
         iteration: int = 1,
+        current_artifact: Optional[EngineeringArtifact] = None,
     ) -> EngineeringArtifact:
         spec_section = self._build_contract_section(contract)
         feedback_section = self._build_feedback_section(review_feedback)
 
-        plan_message = f"""Plan and list every file for the bff/ service.
+        if review_feedback and current_artifact:
+            # Targeted patch mode: fix specific issues in existing code rather
+            # than regenerating all files from scratch (prevents new-bug churn).
+            artifact = await self._patch_files_chunked(
+                system=SYSTEM_PROMPT,
+                existing_artifact=current_artifact,
+                feedback=review_feedback,
+                model_class=EngineeringArtifact,
+                file_keys=["generated_files"],
+            )
+        else:
+            plan_message = f"""Plan and list every file for the bff/ service.
 
 Tech stack: {self.tech_hint}
 
@@ -48,27 +60,27 @@ Tech stack: {self.tech_hint}
 
 Return JSON with every file's content = "__PENDING__". Valid json."""
 
-        fill_tmpl = (
-            f"Write COMPLETE, RUNNABLE {self.tech_hint} content for: {{path}}\n"
-            "Purpose: {purpose}\n"
-            "Service: bff (port 8080, calls backend:8081)\n"
-            "Architecture: {arch_style}\n"
-            "BFF endpoints: {endpoints_summary}\n\n"
-            "Return JSON: {{\"content\": \"<full file>\"}}\n"
-            "No TODOs. Valid json."
-        )
+            fill_tmpl = (
+                f"Write COMPLETE, RUNNABLE {self.tech_hint} content for: {{path}}\n"
+                "Purpose: {purpose}\n"
+                "Service: bff (port 8080, calls backend:8081)\n"
+                "Architecture: {arch_style}\n"
+                "BFF endpoints: {endpoints_summary}\n\n"
+                "Return JSON: {{\"content\": \"<full file>\"}}\n"
+                "No TODOs. Valid json."
+            )
 
-        artifact = await self._query_and_parse_chunked(
-            system=SYSTEM_PROMPT,
-            plan_message=plan_message,
-            file_keys=["generated_files"],
-            model_class=EngineeringArtifact,
-            fill_message_tmpl=fill_tmpl,
-            fill_context={
-                "arch_style": getattr(architecture, "architecture_style", "monorepo"),
-                "endpoints_summary": "; ".join(contract.openapi_spec[:200].splitlines()[:5]) if contract.openapi_spec else "see architecture",
-            },
-        )
+            artifact = await self._query_and_parse_chunked(
+                system=SYSTEM_PROMPT,
+                plan_message=plan_message,
+                file_keys=["generated_files"],
+                model_class=EngineeringArtifact,
+                fill_message_tmpl=fill_tmpl,
+                fill_context={
+                    "arch_style": getattr(architecture, "architecture_style", "monorepo"),
+                    "endpoints_summary": "; ".join(contract.openapi_spec[:200].splitlines()[:5]) if contract.openapi_spec else "see architecture",
+                },
+            )
         artifact.service_name = "bff"
         artifact.review_iteration = iteration
         if review_feedback:

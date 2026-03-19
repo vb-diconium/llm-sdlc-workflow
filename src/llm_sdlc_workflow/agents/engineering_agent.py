@@ -113,18 +113,77 @@ class EngineeringAgent(BaseAgent):
         feedback: ReviewFeedback,
         contract: GeneratedSpecArtifact,
     ) -> EngineeringArtifact:
-        """Re-run all sub-agents with review feedback. Increments review_iteration."""
+        """Re-run sub-agents with review feedback, using targeted patching.
+
+        Each sub-agent receives its own *current* generated files so it can
+        surgically fix the flagged issues instead of regenerating everything
+        from scratch (which causes new-bug churn each iteration).
+        """
+        next_iter = current.review_iteration + 1
         console.print(
             f"[yellow]🔄 Engineering: applying review feedback "
-            f"(iter {current.review_iteration} → {current.review_iteration + 1})[/yellow]"
+            f"(iter {current.review_iteration} → {next_iter})[/yellow]"
         )
-        return await self.run(
-            intent=intent,
-            architecture=architecture,
-            contract=contract,
-            review_feedback=feedback,
-            iteration=current.review_iteration + 1,
+
+        def _service_artifact(service_name: str) -> Optional[EngineeringArtifact]:
+            """Extract per-service EngineeringArtifact from the assembled artifact."""
+            # Try the services dict first (populated when assembled from sub-agents)
+            if service_name in current.services:
+                svc = current.services[service_name]
+                return EngineeringArtifact(
+                    service_name=service_name,
+                    generated_files=svc.generated_files,
+                    environment_variables=svc.environment_variables,
+                    api_endpoints=svc.api_endpoints,
+                    data_models=svc.data_models,
+                    implementation_steps=svc.implementation_steps,
+                    spec_compliance_notes=svc.spec_compliance_notes,
+                    decisions=svc.decisions,
+                    review_iteration=svc.review_iteration,
+                    review_feedback_applied=svc.review_feedback_applied,
+                )
+            # Fall back: filter the flat generated_files list by path prefix
+            prefix = f"{service_name}/"
+            files = [f for f in current.generated_files if f.path.startswith(prefix)]
+            if files:
+                return EngineeringArtifact(
+                    service_name=service_name,
+                    generated_files=files,
+                    review_iteration=current.review_iteration,
+                )
+            return None
+
+        active = {
+            name: agent
+            for name, agent in [
+                ("backend",  self.backend_agent),
+                ("bff",      self.bff_agent),
+                ("frontend", self.frontend_agent),
+            ]
+            if agent is not None
+        }
+        for mobile_agent in self.mobile_agents:
+            active[mobile_agent.slug] = mobile_agent
+
+        console.print(
+            f"[cyan]⚙  Engineering patch (iter {next_iter}): "
+            f"launching {', '.join(active.keys())} in parallel…[/cyan]"
         )
+
+        results = await asyncio.gather(
+            *[
+                a.run(
+                    intent, architecture, contract,
+                    feedback, next_iter,
+                    current_artifact=_service_artifact(name),
+                )
+                for name, a in active.items()
+            ]
+        )
+        service_artifacts = dict(zip(active.keys(), results))
+        assembled = self._assemble(service_artifacts, next_iter)
+        self.save_artifact(assembled, "03_engineering_artifact.json")
+        return assembled
 
     # ─── Assembly ────────────────────────────────────────────────────────────
 

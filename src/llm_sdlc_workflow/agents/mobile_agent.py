@@ -46,6 +46,7 @@ class MobileAgent(BaseAgent):
         contract: GeneratedSpecArtifact,
         review_feedback: Optional[ReviewFeedback] = None,
         iteration: int = 1,
+        current_artifact=None,  # noqa: ARG002 — accepted for API compat; mobile always re-generates
     ) -> EngineeringArtifact:
         spec_section = self._build_contract_section(contract)
         feedback_section = self._build_feedback_section(review_feedback)
