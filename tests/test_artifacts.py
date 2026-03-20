@@ -247,6 +247,49 @@ class TestArchitectureArtifact:
         )
         assert comp.technology_hint is None
 
+    # ── LLM coercion: dict/list returned for str fields ──────────────────────
+
+    def test_system_overview_as_dict(self):
+        a = self._minimal(system_overview={"description": "Three-tier REST API"})
+        assert a.system_overview == "Three-tier REST API"
+
+    def test_architecture_style_as_dict(self):
+        a = self._minimal(architecture_style={"primary": "Monolith", "note": "simple"})
+        assert isinstance(a.architecture_style, str)
+        assert "Monolith" in a.architecture_style
+
+    def test_database_design_as_list(self):
+        a = self._minimal(database_design=["PostgreSQL", "schema per service"])
+        assert isinstance(a.database_design, str)
+        assert "PostgreSQL" in a.database_design
+
+    def test_security_design_as_dict(self):
+        a = self._minimal(security_design={"auth": "JWT", "transport": "TLS"})
+        assert isinstance(a.security_design, str)
+
+    def test_deployment_strategy_as_dict(self):
+        a = self._minimal(deployment_strategy={"type": "Docker", "orchestration": "Compose"})
+        assert isinstance(a.deployment_strategy, str)
+
+    def test_component_spec_name_as_dict(self):
+        comp = ComponentSpec(
+            name={"service": "AuthService"},
+            responsibility="Handle JWT",
+            interfaces=[],
+            dependencies=[],
+        )
+        assert isinstance(comp.name, str)
+        assert "AuthService" in comp.name
+
+    def test_component_spec_responsibility_as_list(self):
+        comp = ComponentSpec(
+            name="DB",
+            responsibility=["Persist data", "Run migrations"],
+            interfaces=[],
+            dependencies=[],
+        )
+        assert isinstance(comp.responsibility, str)
+
 
 # ─── SpecArtifact ─────────────────────────────────────────────────────────────
 
@@ -313,6 +356,17 @@ class TestInfrastructureArtifact:
         )
         assert len(a.iac_files) == 2
         assert a.iac_files[0].path == "Dockerfile"
+
+    # ── LLM coercion: dict/list returned for str fields ──────────────────────
+
+    def test_health_check_path_as_dict_coerces(self):
+        a = self._minimal(health_check_path={"path": "/actuator/health", "method": "GET"})
+        assert isinstance(a.health_check_path, str)
+
+    def test_health_check_path_as_list_coerces(self):
+        a = self._minimal(health_check_path=["/health", "/ready"])
+        assert isinstance(a.health_check_path, str)
+        assert "/health" in a.health_check_path
 
 
 # ─── ReviewArtifact ───────────────────────────────────────────────────────────
@@ -468,6 +522,21 @@ class TestGeneratedSpecArtifact:
         assert spec.service_ports["backend"] == 8081
         assert spec.service_ports["bff"] == 8080
 
+    # ── LLM coercion: dict/list returned for str fields ──────────────────────
+
+    def test_openapi_spec_as_dict_coerces(self):
+        spec = GeneratedSpecArtifact(openapi_spec={"version": "3.0.0", "paths": "/api/todos"})
+        assert isinstance(spec.openapi_spec, str)
+
+    def test_tech_stack_constraints_as_list_coerces(self):
+        spec = GeneratedSpecArtifact(tech_stack_constraints=["Kotlin", "Spring Boot 3"])
+        assert isinstance(spec.tech_stack_constraints, str)
+        assert "Kotlin" in spec.tech_stack_constraints
+
+    def test_architecture_constraints_as_dict_coerces(self):
+        spec = GeneratedSpecArtifact(architecture_constraints={"description": "Three-tier"})
+        assert spec.architecture_constraints == "Three-tier"
+
 
 # ─── EngineeringArtifact ─────────────────────────────────────────────────────
 
@@ -500,3 +569,18 @@ class TestEngineeringArtifact:
         )
         assert ts.framework == "FastAPI"
         assert "pydantic" in ts.key_libraries
+
+    # ── LLM coercion: dict/list returned for str fields ──────────────────────
+
+    def test_infrastructure_as_dict_coerces(self):
+        eng = EngineeringArtifact(infrastructure={"description": "Docker Compose, port 8080"})
+        assert eng.infrastructure == "Docker Compose, port 8080"
+
+    def test_infrastructure_as_list_coerces(self):
+        eng = EngineeringArtifact(infrastructure=["Docker", "Compose"])
+        assert isinstance(eng.infrastructure, str)
+        assert "Docker" in eng.infrastructure
+
+    def test_service_artifact_service_as_dict_coerces(self):
+        svc = ServiceArtifact(service={"name": "backend"})
+        assert isinstance(svc.service, str)

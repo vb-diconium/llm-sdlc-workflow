@@ -7,7 +7,7 @@ passed downstream as context.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -140,6 +140,32 @@ def _coerce_str_field(v: Any) -> str:  # noqa: PLR0911
     return str(v) if v is not None else ""
 
 
+def _coerce_all_str_fields(cls: Any, v: Any) -> Any:
+    """Shared model_validator body: coerces every `str`-typed field that the
+    LLM returned as a dict or list.  Safe for Optional[str] fields (None is
+    left untouched).  Call this from each model's model_validator:
+
+        @model_validator(mode="before")
+        @classmethod
+        def _coerce_str_fields(cls, v):
+            return _coerce_all_str_fields(cls, v)
+    """
+    if not isinstance(v, dict):
+        return v
+    for name, field in cls.model_fields.items():
+        if name not in v or v[name] is None or isinstance(v[name], str):
+            continue
+        ann = field.annotation
+        # bare `str`
+        is_str = ann is str
+        if not is_str and hasattr(ann, "__args__"):
+            # Only coerce Optional[str] = Union[str, None]; NOT List[str], Dict, etc.
+            is_str = getattr(ann, "__origin__", None) is Union and str in ann.__args__
+        if is_str:
+            v[name] = _coerce_str_field(v[name])
+    return v
+
+
 class DiscoveryArtifact(BaseModel):
     """Output of the Discovery Agent — the distilled understanding of what needs to be built."""
 
@@ -158,12 +184,8 @@ class DiscoveryArtifact(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _coerce_str_fields(cls, v: Any) -> Any:
-        """Coerce scope and domain_context when the LLM returns a dict/list instead of str."""
-        if isinstance(v, dict):
-            for field in ("scope", "domain_context", "raw_requirements"):
-                if field in v and not isinstance(v[field], str):
-                    v[field] = _coerce_str_field(v[field])
-        return v
+        """Coerce all str-typed fields when the LLM returns a dict/list instead of str."""
+        return _coerce_all_str_fields(cls, v)
 
     @field_validator(
         "requirements", "user_goals", "constraints", "success_criteria",
@@ -185,6 +207,11 @@ class ComponentSpec(BaseModel):
     dependencies: List[str]
     technology_hint: Optional[str] = None
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_str_fields(cls, v: Any) -> Any:
+        return _coerce_all_str_fields(cls, v)
+
 
 class ArchitectureArtifact(BaseModel):
     """Output of the Architecture Agent — the system design blueprint."""
@@ -202,6 +229,11 @@ class ArchitectureArtifact(BaseModel):
     trade_offs: List[str]
     spec_compliance_notes: List[str] = []
     design_decisions: List[DecisionRecord] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_str_fields(cls, v: Any) -> Any:
+        return _coerce_all_str_fields(cls, v)
 
     @field_validator(
         "data_flow", "api_design", "patterns_used",
@@ -272,6 +304,11 @@ class EngineeringArtifact(BaseModel):
     review_iteration: int = 1
     review_feedback_applied: List[str] = []
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_str_fields(cls, v: Any) -> Any:
+        return _coerce_all_str_fields(cls, v)
+
     @field_validator(
         "api_endpoints", "data_models", "spec_compliance_notes", "review_feedback_applied",
         mode="before",
@@ -300,6 +337,11 @@ class ServiceArtifact(BaseModel):
     decisions: List[DecisionRecord] = []
     review_iteration: int = 1
     review_feedback_applied: List[str] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_str_fields(cls, v: Any) -> Any:
+        return _coerce_all_str_fields(cls, v)
 
     @field_validator(
         "api_endpoints", "data_models", "spec_compliance_notes", "review_feedback_applied",
@@ -341,6 +383,11 @@ class InfrastructureArtifact(BaseModel):
     decisions: List[DecisionRecord] = []
     review_iteration: int = 1
     review_feedback_applied: List[str] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_str_fields(cls, v: Any) -> Any:
+        return _coerce_all_str_fields(cls, v)
 
     @field_validator(
         "service_dependencies", "build_notes", "spec_compliance_notes", "review_feedback_applied",
@@ -515,4 +562,9 @@ class GeneratedSpecArtifact(BaseModel):
 
     # Short human-readable summary for the usage guide
     usage_guide: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_str_fields(cls, v: Any) -> Any:
+        return _coerce_all_str_fields(cls, v)
 
