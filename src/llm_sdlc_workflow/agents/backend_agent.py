@@ -45,6 +45,7 @@ class BackendAgent(BaseAgent):
                 feedback=review_feedback,
                 model_class=EngineeringArtifact,
                 file_keys=["generated_files"],
+                spec_context=contract.openapi_spec[:3000] if contract.openapi_spec else "",
             )
         else:
             backend_port = contract.service_ports.get("backend", 8080) if contract.service_ports else 8080

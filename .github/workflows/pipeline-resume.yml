@@ -39,11 +39,26 @@ on:
 jobs:
   resume-pipeline:
     runs-on: ubuntu-latest
+    timeout-minutes: 90   # same headroom as pipeline-run
     env:
       PROJECT_NAME: ${{ github.event.inputs.project_name }}
       OUTPUT_REPO:  ${{ github.repository_owner }}/${{ github.event.inputs.project_name }}
     steps:
       - uses: actions/checkout@v4
+
+      # Fail fast before touching anything if required secrets are absent
+      - name: Validate required secrets
+        env:
+          HAS_PAT: ${{ secrets.PIPELINE_GITHUB_PAT != '' }}
+          HAS_KEY: ${{ secrets.PIPELINE_API_KEY != '' }}
+        run: |
+          ERRORS=""
+          [ "$HAS_PAT" != "true" ] && ERRORS="${ERRORS}\n- PIPELINE_GITHUB_PAT not set (needs repo+workflow scope)"
+          [ "$HAS_KEY" != "true" ] && ERRORS="${ERRORS}\n- PIPELINE_API_KEY not set (LLM provider key)"
+          if [ -n "$ERRORS" ]; then
+            printf "::error::Missing required secrets:%b\n" "$ERRORS"
+            exit 1
+          fi
 
       - uses: actions/setup-python@v5
         with:
@@ -53,6 +68,7 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Post "resuming" comment
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.PIPELINE_GITHUB_PAT || secrets.GITHUB_TOKEN }}
@@ -89,12 +105,15 @@ jobs:
           echo "run_dir=$RUN_DIR" >> "$GITHUB_OUTPUT"
           echo "Found run dir: $RUN_DIR"
 
+      # Capture exit code — do NOT use set -e so partial artifacts always upload
       - name: Resume pipeline
+        id: pipeline
         env:
           PIPELINE_API_KEY:  ${{ secrets.PIPELINE_API_KEY }}
           PIPELINE_BASE_URL: ${{ vars.PIPELINE_BASE_URL }}
           PIPELINE_MODEL:    ${{ github.event.inputs.model }}
         run: |
+          set +e
           python main.py \
             --resume-from "${{ steps.find_run.outputs.run_dir }}" \
             --resume-stage "${{ github.event.inputs.resume_stage }}" \
@@ -102,9 +121,16 @@ jobs:
             --model "${{ github.event.inputs.model }}" \
             --auto \
             ${{ github.event.inputs.extra_flags }}
+          PIPELINE_EXIT=$?
+          echo "pipeline_exit=$PIPELINE_EXIT" >> "$GITHUB_OUTPUT"
+          echo "run_dir=${{ steps.find_run.outputs.run_dir }}" >> "$GITHUB_OUTPUT"
+          echo "Resume pipeline exit=$PIPELINE_EXIT"
+          exit $PIPELINE_EXIT
 
       # ── Push updated code to existing output repo ──────────────────────────
       - name: Push updated code to output repo
+        if: success()
+        id: push_code
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_GITHUB_PAT }}
         run: |
@@ -112,9 +138,17 @@ jobs:
           CODE_DIR="${RUN_DIR}/${PROJECT_NAME}"
 
           if [ ! -d "$CODE_DIR" ]; then
-            echo "ERROR: Could not find generated code at $CODE_DIR"
+            echo "::error::Generated code not found at: $CODE_DIR"
+            ls -la "${RUN_DIR}/" 2>/dev/null || echo "(run dir not accessible)"
             exit 1
           fi
+
+          FILE_COUNT=$(find "$CODE_DIR" -type f | wc -l | tr -d ' ')
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::error::Generated code directory is empty: $CODE_DIR"
+            exit 1
+          fi
+          echo "Pushing $FILE_COUNT generated files"
 
           cd "$CODE_DIR"
 
@@ -131,92 +165,147 @@ jobs:
           Resumed from artifact: ${{ github.event.inputs.artifact_name }}
           Pipeline run: ${{ github.run_id }}"
 
-          # Push (force — resume may change previously committed files)
+          # Set/update remote, then push with retries
           if git remote get-url origin > /dev/null 2>&1; then
-            git remote set-url origin https://x-access-token:${GH_TOKEN}@github.com/${{ env.OUTPUT_REPO }}.git
+            git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ env.OUTPUT_REPO }}.git"
           else
-            git remote add origin https://x-access-token:${GH_TOKEN}@github.com/${{ env.OUTPUT_REPO }}.git
+            git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ env.OUTPUT_REPO }}.git"
           fi
-          git push -u origin main --force
 
-      # ── Upload updated artifacts ───────────────────────────────────────────
+          for attempt in 1 2 3; do
+            if git push -u origin main --force; then
+              echo "pushed=true" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            [ $attempt -lt 3 ] && echo "Push attempt $attempt failed — retrying in 15s…" && sleep 15
+            [ $attempt -eq 3 ] && echo "::error::Push failed after 3 attempts" && exit 1
+          done
+
+      # Always upload — partial run is resumable
       - name: Upload updated artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pipeline-run-${{ github.run_number }}
-          path: artifacts/
+          path: ${{ steps.find_run.outputs.run_dir }}
           retention-days: 90
+          if-no-files-found: warn
 
       - name: Update release with new artifacts
         if: success()
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_GITHUB_PAT }}
         run: |
           RUN_DIR="${{ steps.find_run.outputs.run_dir }}"
+          TAG="pipeline-run-${{ github.run_number }}"
           DECISIONS_LOG="${RUN_DIR}/DECISIONS_LOG.md"
-          zip -r "pipeline-run-${{ github.run_number }}.zip" "$RUN_DIR/"
 
-          # Create a new release on the output repo
-          NOTES="## Resumed Pipeline Run #${{ github.run_number }}\n\n"
-          NOTES+="**Resumed from stage:** ${{ github.event.inputs.resume_stage }}\n"
-          NOTES+="**Original artifact:** ${{ github.event.inputs.artifact_name }}\n"
-          NOTES+="**Source issue:** ${{ github.repository }}#${{ github.event.inputs.issue_number }}\n\n"
+          # Truncate notes — GitHub enforces a ~125 kB limit
           if [ -f "$DECISIONS_LOG" ]; then
-            NOTES+="$(cat "$DECISIONS_LOG")"
+            NOTES_BODY=$(head -c 50000 "$DECISIONS_LOG")
+          else
+            NOTES_BODY="*(DECISIONS_LOG.md not found in this run)*"
           fi
 
-          gh release create "pipeline-run-${{ github.run_number }}" \
-            "pipeline-run-${{ github.run_number }}.zip" \
-            --repo "${{ env.OUTPUT_REPO }}" \
+          # Zip only JSON/log artifacts (skip generated source to keep zip small)
+          zip -r "${TAG}.zip" "$RUN_DIR/" \
+            --exclude "${RUN_DIR}/${PROJECT_NAME}/*" 2>/dev/null || \
+          zip -r "${TAG}.zip" "$RUN_DIR/"
+
+          HEADER="## Resumed Pipeline Run #${{ github.run_number }}
+          | | |
+          |---|---|
+          | Resumed from stage | \`${{ github.event.inputs.resume_stage }}\` |
+          | Original artifact  | \`${{ github.event.inputs.artifact_name }}\` |
+          | Source issue       | ${{ github.repository }}#${{ github.event.inputs.issue_number }} |
+          | Actions run        | [link](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+
+          ---
+          "
+
+          # Delete existing tag if present (idempotent re-runs)
+          gh release view "$TAG" --repo "${{ env.OUTPUT_REPO }}" > /dev/null 2>&1 && \
+            gh release delete "$TAG" --repo "${{ env.OUTPUT_REPO }}" --yes || true
+
+          gh release create "$TAG" "${TAG}.zip" \
+            --repo  "${{ env.OUTPUT_REPO }}" \
             --title "Resumed run #${{ github.run_number }} (from ${{ github.event.inputs.resume_stage }})" \
-            --notes "$(printf '%b' "$NOTES")"
+            --notes "${HEADER}${NOTES_BODY}"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       # ── Post result comment on original issue ──────────────────────────────
       - name: Post success comment
         if: success()
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.PIPELINE_GITHUB_PAT || secrets.GITHUB_TOKEN }}
           script: |
-            const owner    = context.repo.owner;
-            const repo     = context.repo.repo;
-            const run_url  = `${{ github.server_url }}/${owner}/${repo}/actions/runs/${{ github.run_id }}`;
-            const out_repo = `https://github.com/${owner}/${{ env.PROJECT_NAME }}`;
-            const release_url = `${out_repo}/releases/tag/pipeline-run-${{ github.run_number }}`;
+            const owner      = context.repo.owner;
+            const repo       = context.repo.repo;
+            const run_url    = `${{ github.server_url }}/${owner}/${repo}/actions/runs/${{ github.run_id }}`;
+            const out_repo   = `https://github.com/${owner}/${{ env.PROJECT_NAME }}`;
+            const tag        = 'pipeline-run-${{ github.run_number }}';
+            const rel_url    = `${out_repo}/releases/tag/${tag}`;
+            const resume_url = `${{ github.server_url }}/${owner}/${repo}/actions/workflows/pipeline-resume.yml`;
+
             await github.rest.issues.createComment({
               owner, repo,
               issue_number: parseInt('${{ github.event.inputs.issue_number }}'),
               body: [
                 '## ✅ Resume completed successfully',
                 '',
-                `| | |`,
-                `|---|---|`,
+                '| | |',
+                '|---|---|',
                 `| **Updated repo** | [${owner}/${{ env.PROJECT_NAME }}](${out_repo}) |`,
-                `| **Artifacts + DECISIONS_LOG.md** | [Release pipeline-run-${{ github.run_number }}](${release_url}) |`,
+                `| **Artifacts + DECISIONS_LOG** | [${tag}](${rel_url}) |`,
                 `| **Actions run** | [#${{ github.run_number }}](${run_url}) |`,
                 `| **Resumed from** | \`${{ github.event.inputs.resume_stage }}\` |`,
+                '',
+                '---',
+                '**To resume again from a later stage:**',
+                `Go to [Resume Pipeline](${resume_url}) and set **artifact name** → \`${tag}\``,
               ].join('\n')
             });
 
       - name: Post failure comment
         if: failure()
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.PIPELINE_GITHUB_PAT || secrets.GITHUB_TOKEN }}
           script: |
-            const owner   = context.repo.owner;
-            const repo    = context.repo.repo;
-            const run_url = `${{ github.server_url }}/${owner}/${repo}/actions/runs/${{ github.run_id }}`;
+            const owner       = context.repo.owner;
+            const repo        = context.repo.repo;
+            const run_url     = `${{ github.server_url }}/${owner}/${repo}/actions/runs/${{ github.run_id }}`;
+            const resume_url  = `${{ github.server_url }}/${owner}/${repo}/actions/workflows/pipeline-resume.yml`;
+            const pipelineExit = '${{ steps.pipeline.outputs.pipeline_exit }}';
+            const pushedCode   = '${{ steps.push_code.outputs.pushed }}';
+
+            let diagnosis = '';
+            if (pipelineExit && pipelineExit !== '0') {
+              diagnosis = '\n\n**Diagnosis:** LLM pipeline failed during the resumed stage. ' +
+                'Partial artifacts were uploaded — you can resume again from the last good stage.';
+            } else if (!pushedCode) {
+              diagnosis = '\n\n**Diagnosis:** Pipeline succeeded but code push to output repo failed. ' +
+                'The generated code is in the Actions artifact above.';
+            }
+
             await github.rest.issues.createComment({
               owner, repo,
               issue_number: parseInt('${{ github.event.inputs.issue_number }}'),
               body: [
                 '## ❌ Resume failed',
+                `**Actions run (with full logs):** [#${{ github.run_number }}](${run_url})`,
+                diagnosis,
                 '',
-                `**Actions run (with logs):** [#${{ github.run_number }}](${run_url})`,
-                '',
-                'Check the logs above. You can retry this resume workflow with the same artifact name,',
-                'or try a different `resume_stage` if the failure is earlier/later in the pipeline.',
+                '---',
+                '**To retry this resume:**',
+                `Go to [Resume Pipeline](${resume_url}) and set:`,
+                `- **artifact name** → \`pipeline-run-${{ github.run_number }}\` *(partial artifacts saved)*`,
+                `- **issue number** → \`${{ github.event.inputs.issue_number }}\``,
+                '- Choose the stage to resume from',
               ].join('\n')
             });

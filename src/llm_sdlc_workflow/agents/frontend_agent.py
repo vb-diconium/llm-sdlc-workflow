@@ -45,6 +45,7 @@ class FrontendAgent(BaseAgent):
                 feedback=review_feedback,
                 model_class=EngineeringArtifact,
                 file_keys=["generated_files"],
+                spec_context=contract.openapi_spec[:3000] if contract.openapi_spec else "",
             )
         else:
             plan_message = f"""Plan and list every file for the frontend/ service.

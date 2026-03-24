@@ -277,6 +277,7 @@ class BaseAgent:
         feedback: "ReviewFeedback",
         model_class: Type[T],
         file_keys: List[str],
+        spec_context: str = "",
     ) -> T:
         """Targeted patching mode for review feedback iterations.
 
@@ -287,6 +288,9 @@ class BaseAgent:
 
         This prevents the "random regeneration" problem where the LLM introduces new bugs
         each review iteration because it cannot see the existing generated code.
+
+        spec_context: optional contract/OpenAPI snippet injected into each patch prompt so
+        the LLM knows the authoritative API shape when fixing DTOs, controllers, etc.
         """
         from llm_sdlc_workflow.models.artifacts import ReviewFeedback as _RF  # noqa: F401
         console.print(Rule(f"[bold yellow]{self.name} (patch)[/bold yellow]"))
@@ -329,11 +333,21 @@ class BaseAgent:
                     else "  (no specific issues for this file)"
                 )
 
+                # Inject authoritative API contract so the LLM knows the
+                # correct DTO shapes, endpoint signatures, and response bodies
+                # when fixing controllers, services, and data classes.
+                spec_block = (
+                    f"\n## API Contract (authoritative — your code MUST conform):\n"
+                    f"```yaml\n{spec_context}\n```\n"
+                    if spec_context else ""
+                )
+
                 if existing_content:
                     fill_msg = (
                         f"Fix specific code-review issues in this existing file.\n\n"
                         f"File: {path}\n"
-                        f"Purpose: {purpose}\n\n"
+                        f"Purpose: {purpose}\n"
+                        f"{spec_block}\n"
                         f"## Issues to fix (only those relevant to THIS file):\n{issues_str}\n\n"
                         f"## Existing file content (apply fixes, keep everything else intact):\n"
                         f"```\n{existing_content[:6000]}\n```\n\n"
@@ -344,7 +358,8 @@ class BaseAgent:
                     fill_msg = (
                         f"Generate COMPLETE content for this new file.\n\n"
                         f"File: {path}\n"
-                        f"Purpose: {purpose}\n\n"
+                        f"Purpose: {purpose}\n"
+                        f"{spec_block}\n"
                         f"## Known issues to avoid:\n{issues_str}\n\n"
                         'Return JSON: {"content": "<full file content>"}\nNo TODOs. Valid json.'
                     )
