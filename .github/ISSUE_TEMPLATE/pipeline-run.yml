@@ -1,0 +1,102 @@
+name: "🚀 Run Pipeline"
+description: "Trigger the LLM SDLC pipeline to generate a new project from requirements"
+title: "[pipeline] "
+labels:
+  - run-pipeline
+body:
+  - type: input
+    id: project_name
+    attributes:
+      label: Project Name
+      description: >
+        Name for the generated GitHub repository (e.g. `todo-api`, `my-service`).
+        A new repo **`{your-org}/{project_name}`** will be created automatically.
+        Must be a valid GitHub repo name (letters, numbers, hyphens only).
+      placeholder: my-project-name
+    validations:
+      required: true
+
+  - type: dropdown
+    id: model
+    attributes:
+      label: LLM Model
+      description: Model to use for code generation. Haiku is fastest and cheapest; Sonnet/Opus produce higher quality.
+      options:
+        - "claude-haiku-4-5-20251001"
+        - "claude-sonnet-4-5-20251001"
+        - "gpt-4o-mini"
+        - "gpt-4o"
+      default: 0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: visibility
+    attributes:
+      label: Output Repo Visibility
+      options:
+        - "private"
+        - "public"
+      default: 0
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: service_flags
+    attributes:
+      label: Services to generate
+      description: By default all three tiers (backend + BFF + frontend) are generated. Uncheck to disable.
+      options:
+        - label: "`--no-bff` — disable BFF layer (use for pure API projects)"
+        - label: "`--no-frontend` — disable frontend (API-only or mobile-first)"
+        - label: "`--mobile` — add React Native mobile app"
+
+  - type: input
+    id: extra_flags
+    attributes:
+      label: Extra flags (optional)
+      description: >
+        Any additional CLI flags, e.g. `--backend-lang Python --backend-framework FastAPI`
+        or `--tech-constraints "PostgreSQL 16, Redis 7"`.
+      placeholder: "--backend-lang Python --backend-framework FastAPI"
+
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirements
+      description: >
+        Paste your full requirements here. Be as specific as possible — endpoints,
+        data models, non-functional requirements, technology preferences.
+      placeholder: |
+        Build a REST API for a task management system.
+
+        Requirements:
+        1. POST /tasks — create a task with title, description, priority (low/medium/high)
+        2. GET /tasks — list all tasks, filterable by status and priority
+        3. GET /tasks/{id} — get a single task
+        4. PUT /tasks/{id} — update task fields
+        5. DELETE /tasks/{id} — soft-delete a task
+        6. GET /health — liveness check
+
+        Constraints:
+        - Kotlin + Spring Boot 3.3
+        - PostgreSQL for persistence
+        - JWT authentication on all endpoints except /health
+        - Stateless, 12-factor app
+      render: text
+    validations:
+      required: true
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+        **What happens next:**
+        1. Adding the `run-pipeline` label triggers the pipeline automatically
+        2. A bot comment will appear on this issue with live progress
+        3. On success: a new repo is created with the generated code + a DECISIONS_LOG.md release
+        4. To resume/retry: use the **[Resume Pipeline](.github/workflows/pipeline-resume.yml)** workflow dispatch
+
+        **Secrets required** (set once in repo Settings → Secrets):
+        - `PIPELINE_GITHUB_PAT` — PAT with `repo` + `workflow` scopes (for creating new repos)
+        - `PIPELINE_API_KEY` — your LLM provider API key
