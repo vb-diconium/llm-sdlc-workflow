@@ -1,0 +1,31 @@
+# Gitleaks configuration
+# https://github.com/gitleaks/gitleaks
+
+title = "llm-sdlc-workflow"
+
+[extend]
+# Extend the default ruleset from gitleaks
+useDefault = true
+
+[allowlist]
+description = "Global allowlist"
+paths = [
+    # Generated code and run artifacts — may contain example env files, placeholder tokens
+    "artifacts/",
+    # README and docs use placeholder values like sk-..., github_pat_XXXX
+    "README.md",
+    "docs/",
+]
+regexes = [
+    # Placeholder patterns used in documentation
+    "sk-\\.\\.\\.",
+    "sk-ant-\\.\\.\\.",
+    "xai-\\.\\.\\.",
+    "AIza\\.\\.\\.",
+    "github_pat_XXXX",
+    "XXXXXXXXXXXXXXXXXXXX",
+    # Test fixture tokens
+    "ghp_test_",
+    "ghp_should_not",
+    "ghp_fallback",
+]

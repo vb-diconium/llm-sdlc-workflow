@@ -156,7 +156,7 @@ Runs on **GitHub Models** via your **GitHub Copilot licence** — no separate AP
 | ↳ **Mobile Agent** | React Native (Expo SDK 51) by default; supports Flutter, Swift, Kotlin — files under `mobile/`. Opt-in via `--mobile` or `components.mobile: true` | `ServiceArtifact` |
 | **Infrastructure Agent** | Dockerfiles + docker-compose for the full monorepo stack | `InfrastructureArtifact` |
 | **Deployment Agent** | GitHub Actions CI/CD workflows, Kubernetes manifests, Helm chart, blue-green + canary strategies, rollback scripts | `DeploymentArtifact` |
-| **Review Agent** | Security (OWASP), reliability, code quality — feedback loop until no critical/high issues | `ReviewArtifact` |
+| **Review Agent** | Security (OWASP), reliability, code quality — feedback loop until no critical/high issues. Score is computed via a deterministic rubric (start 100, deduct 15/8/3/1 per critical/high/medium/low issue per dimension, weighted average) — never a guess | `ReviewArtifact` |
 | **Testing Agent** | 3-stage: architecture plan → live HTTP + Cypress e2e → final sign-off | `TestingArtifact` |
 
 ---
@@ -882,29 +882,37 @@ python3.11 main.py --requirements reqs.txt
 
 ---
 
-#### Anthropic Claude
+#### Anthropic Claude (direct — no proxy needed)
 
-Anthropic's native API is **not** OpenAI-compatible. The recommended approach is to use a local proxy such as [LiteLLM](https://github.com/BerriAI/litellm) which translates the OpenAI format to Anthropic's Messages API:
+Anthropic exposes an OpenAI-compatible endpoint at `https://api.anthropic.com/v1`. The pipeline supports it natively — no LiteLLM proxy required:
 
 ```bash
-# 1. Install and start LiteLLM proxy
-pip install litellm[proxy]
-ANTHROPIC_API_KEY=sk-ant-... litellm --model claude-opus-4-5 --port 4000
-
-# 2. Point the pipeline at the local proxy
-export PIPELINE_API_KEY=anything           # LiteLLM accepts any non-empty key
-export PIPELINE_BASE_URL=http://localhost:4000
-export PIPELINE_MODEL=claude-opus-4-5
+export PIPELINE_API_KEY=sk-ant-...                 # from console.anthropic.com
+export PIPELINE_BASE_URL=https://api.anthropic.com/v1
+export PIPELINE_MODEL=claude-haiku-4-5-20251001    # or claude-opus-4-5, claude-sonnet-4-5
 
 python3.11 main.py --requirements reqs.txt
 ```
 
-Alternatively, use Claude through **AWS Bedrock** (OpenAI-compatible via Amazon's converse API) or **Google Vertex AI** (OpenAI-compatible):
+The pipeline automatically detects the Anthropic endpoint and:
+- Omits `response_format: json_object` (not supported by Anthropic's compat layer)
+- Limits concurrency to 1 (Anthropic's 10k output-tokens/min org limit)
+- Adds a 2s inter-call delay between file generation calls
+
+| Model | Quality | Speed | Cost tier |
+|---|---|---|---|
+| `claude-haiku-4-5-20251001` | Good | Fastest | Lowest |
+| `claude-sonnet-4-5-20251001` | Great | Medium | Medium |
+| `claude-opus-4-5-20251001` | Best | Slowest | Highest |
+
+Alternatively, use Claude through a **LiteLLM proxy**, **AWS Bedrock**, or **Google Vertex AI** if you prefer those routing layers:
 
 ```bash
-# AWS Bedrock via LiteLLM
-AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
-  litellm --model bedrock/anthropic.claude-opus-4-5-20251101-v1:0 --port 4000
+# Via LiteLLM proxy (optional)
+pip install litellm[proxy]
+ANTHROPIC_API_KEY=sk-ant-... litellm --model claude-opus-4-5 --port 4000
+export PIPELINE_BASE_URL=http://localhost:4000
+export PIPELINE_MODEL=claude-opus-4-5
 ```
 
 ---
@@ -940,7 +948,7 @@ python3.11 main.py --requirements reqs.txt
 | xAI Grok | `https://api.x.ai/v1` | [console.x.ai](https://console.x.ai) | `grok-3-beta` |
 | Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` | [aistudio.google.com](https://aistudio.google.com/app/apikey) | `gemini-2.0-flash` |
 | Mistral | `https://api.mistral.ai/v1` | [console.mistral.ai](https://console.mistral.ai) | `mistral-large-latest` |
-| Anthropic Claude | via LiteLLM proxy | [console.anthropic.com](https://console.anthropic.com) | `claude-opus-4-5` |
+| Anthropic Claude | `https://api.anthropic.com/v1` | [console.anthropic.com](https://console.anthropic.com) | `claude-haiku-4-5-20251001` |
 | Ollama (local) | `http://localhost:11434/v1` | any string | `llama3.3` |
 
 > With your own key, rate limits and billing are managed entirely by your chosen provider — not GitHub.
@@ -1068,6 +1076,7 @@ artifacts/run_20260318_120000/
 ├── 06b_infrastructure_apply_artifact.json # Infrastructure Agent — containers started
 ├── 07_deployment_artifact.json           # Deployment Agent — CI/CD + K8s + Helm
 ├── *_agent_history.json                 # full LLM conversation history per agent
+├── DECISIONS_LOG.md                     # ← human-readable audit log of all agent decisions
 └── generated/                           # ← all generated source code + IaC
     ├── backend/                         # Language/framework — configurable (default: Kotlin/Spring Boot)
     │   ├── build.gradle.kts             #   (or pyproject.toml, go.mod, package.json …)
@@ -1201,13 +1210,15 @@ The JSON schema at the bottom of each prompt file defines the artifact structure
 
 3. **Parallel sub-agents** — Only the *enabled* sub-agents run, via `asyncio.gather`. Disable BFF or Frontend with a flag; add Mobile with `--mobile`. Infrastructure planning also runs in parallel with Engineering. After the review loop, the **Infrastructure Agent** (start containers) and **Deployment Agent** (CI/CD + K8s + Helm) both run in parallel.
 
-4. **Review feedback loop** — the Review Agent runs up to 3 times. If critical issues are found, Engineering and Infrastructure both re-generate in parallel with the feedback applied.
+4. **Review feedback loop** — the Review Agent runs up to 3 times. If critical issues are found, Engineering and Infrastructure both re-generate in parallel with the feedback applied. Review scores are **deterministic**: start at 100 and deduct fixed points per issue severity, weighted across security/reliability/maintainability/performance dimensions.
 
 5. **Compact context** — each agent receives a compact summary of upstream artifacts, not raw JSON blobs. Keeps prompts lean and LLM calls fast.
 
 6. **Incremental contracts** — `--from-run` marks existing API paths `x-existing: true` so new runs only add endpoints, never silently break a live API.
 
-7. **Full decision traceability** — every agent appends `DecisionRecord` entries documenting what was decided, why, and what alternatives were rejected. All records are persisted to `*_history.json`.
+7. **Full decision traceability** — every agent records `DecisionRecord` entries (what was decided, why, alternatives rejected). A `DECISIONS_LOG.md` is written to the run directory after every run — a human-readable audit trail of all agent decisions across all pipeline stages.
+
+8. **Topology contract** — the pipeline computes a `TopologyContract` before any agent runs. It assigns canonical ports to every service (backend-only → 8080; full-stack → backend:8081, BFF:8080, frontend:3000) and injects this contract into every agent that generates ports, Dockerfiles, or docker-compose. Prevents port-mismatch bugs where one agent picks 8080 and another picks 8081.
 
 ---
 

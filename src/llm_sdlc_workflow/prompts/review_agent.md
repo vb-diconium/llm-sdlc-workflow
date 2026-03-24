@@ -38,6 +38,54 @@ The `iteration` field in the input tells you which review pass this is.
 - Iteration 2+: re-review only the areas cited in previous critical/high issues.
   Confirm fixed issues. Flag any new regressions.
 
+## Deterministic scoring rubric
+
+Compute ALL scores using this formula. Do **not** use gut feeling or relative impression.
+
+### Per-dimension score
+
+For each of the four dimensions (security, reliability, maintainability, performance):
+
+1. Count issues in that dimension by severity:
+   - `C` = number of critical issues
+   - `H` = number of high issues
+   - `M` = number of medium issues
+   - `L` = number of low issues
+
+2. Apply deductions starting from 100:
+   ```
+   dimension_score = max(0, 100 - (C × 15) - (H × 8) - (M × 3) - (L × 1))
+   ```
+
+### Overall score
+
+Weighted average of the four dimension scores:
+```
+overall_score = round(
+    security_score       × 0.35 +
+    reliability_score    × 0.25 +
+    maintainability_score × 0.25 +
+    performance_score    × 0.15
+)
+```
+
+### Severity deduction table
+
+| Severity | Deduction per issue |
+|----------|--------------------|
+| critical | −15 pts |
+| high     | −8 pts  |
+| medium   | −3 pts  |
+| low      | −1 pt   |
+
+### Examples
+
+- 2 critical security + 1 high security → `security_score = max(0, 100 − 30 − 8) = 62`
+- 0 issues in performance → `performance_score = 100`
+- `overall_score = round(62×0.35 + 80×0.25 + 75×0.25 + 100×0.15) = round(21.7 + 20 + 18.75 + 15) = 76`
+
+**Always compute the scores; never leave them at 0 or estimate loosely.**
+
 ## Output rules
 
 `passed` MUST be `false` if ANY critical issue remains.
