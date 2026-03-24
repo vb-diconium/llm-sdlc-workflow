@@ -4,99 +4,170 @@ on:
   issues:
     types: [labeled]
 
-# Only fire when the run-pipeline label is added
+# Prevents two runs for the same issue from racing.
+# cancel-in-progress: false — finish the current run so partial artifacts
+# are always uploaded, then start the next queued run.
+concurrency:
+  group: pipeline-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
+  # ── JOB 1: validate & parse ───────────────────────────────────────────────
   gate:
     if: github.event.label.name == 'run-pipeline'
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       project_name: ${{ steps.parse.outputs.project_name }}
       model:        ${{ steps.parse.outputs.model }}
       visibility:   ${{ steps.parse.outputs.visibility }}
       flags:        ${{ steps.parse.outputs.flags }}
-      req_file:     ${{ steps.parse.outputs.req_file }}
     steps:
       - uses: actions/checkout@v4
 
+      # Fail fast before doing anything if required secrets are absent
+      - name: Validate required secrets
+        env:
+          HAS_PAT: ${{ secrets.PIPELINE_GITHUB_PAT != '' }}
+          HAS_KEY: ${{ secrets.PIPELINE_API_KEY != '' }}
+        run: |
+          ERRORS=""
+          [ "$HAS_PAT" != "true" ] && ERRORS="${ERRORS}\n- PIPELINE_GITHUB_PAT not set (needs repo+workflow scope)"
+          [ "$HAS_KEY" != "true" ] && ERRORS="${ERRORS}\n- PIPELINE_API_KEY not set (LLM provider key)"
+          if [ -n "$ERRORS" ]; then
+            printf "::error::Missing required secrets:%b\n" "$ERRORS"
+            exit 1
+          fi
+
       - name: Post "starting" comment
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.PIPELINE_GITHUB_PAT || secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.PIPELINE_GITHUB_PAT }}
           script: |
             await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo:  context.repo.repo,
+              owner: context.repo.owner, repo: context.repo.repo,
               issue_number: context.issue.number,
               body: [
                 '## 🚀 Pipeline starting',
-                '',
                 `**Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`,
-                '',
-                'Parsing requirements from this issue body…',
-              ].join('\n')
+                'Parsing and validating requirements…',
+              ].join('\n\n')
             })
 
-      - name: Parse issue body
+      - name: Parse and validate issue body
         id: parse
         env:
-          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_BODY:   ${{ github.event.issue.body }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           python3 - <<'PYEOF'
           import os, re, sys
 
-          body = os.environ["ISSUE_BODY"]
-          issue_num = os.environ["ISSUE_NUMBER"]
+          body   = os.environ.get("ISSUE_BODY", "")
+          errors = []
 
           def extract(label):
-              """Extract content under a markdown ### heading."""
-              pattern = rf"### {re.escape(label)}\s*\n+(.*?)(?=\n###|\Z)"
+              pattern = rf"### {re.escape(label)}\s*\r?\n+(.*?)(?=\r?\n###|\Z)"
               m = re.search(pattern, body, re.DOTALL)
               return m.group(1).strip() if m else ""
 
-          project_name = re.sub(r"[^a-zA-Z0-9\-_]", "-", extract("Project Name").strip())
-          model        = extract("LLM Model").strip() or "claude-haiku-4-5-20251001"
-          visibility   = extract("Output Repo Visibility").strip() or "private"
-          requirements = extract("Requirements").strip()
-          extra_flags  = extract("Extra flags (optional)").strip()
-
-          # Parse service checkboxes
-          flags_raw = extract("Services to generate")
-          flags = []
-          if re.search(r"\[x\].*--no-bff",        flags_raw, re.I): flags.append("--no-bff")
-          if re.search(r"\[x\].*--no-frontend",    flags_raw, re.I): flags.append("--no-frontend")
-          if re.search(r"\[x\].*--mobile",         flags_raw, re.I): flags.append("--mobile")
-          if extra_flags:
-              flags.append(extra_flags)
-
+          # Project name — sanitise, truncate
+          raw_name     = extract("Project Name").strip()
+          project_name = re.sub(r"-{2,}", "-",
+                           re.sub(r"[^a-zA-Z0-9\-_]", "-", raw_name)).strip("-")
           if not project_name:
-              print("ERROR: project_name is empty", file=sys.stderr)
-              sys.exit(1)
-          if not requirements:
-              print("ERROR: requirements are empty", file=sys.stderr)
+              errors.append("Project Name is empty or contains only special characters.")
+          elif len(project_name) > 100:
+              project_name = project_name[:100]
+
+          # Model — strip stray quotes/backticks, allow only safe chars
+          model_raw = extract("LLM Model").strip().strip("`'\"")
+          model     = re.sub(r"[^a-zA-Z0-9\-._:]", "", model_raw) or "claude-haiku-4-5-20251001"
+
+          # Visibility
+          vis_raw    = extract("Output Repo Visibility").strip().lower()
+          visibility = vis_raw if vis_raw in ("private", "public") else "private"
+
+          # Requirements — strip accidental code fences, check length
+          requirements = extract("Requirements").strip()
+          requirements = re.sub(r"^```[a-z]*\s*", "", requirements)
+          requirements = re.sub(r"\s*```$", "",    requirements).strip()
+          if len(requirements) < 20:
+              errors.append(
+                  "Requirements field is empty or too short "
+                  "(needs at least 20 characters — describe what you want to build)."
+              )
+
+          # Service flags — only allow known safe flags
+          flags_raw  = extract("Services to generate")
+          extra_raw  = extract("Extra flags (optional)").strip()
+          flags = []
+          if re.search(r"\[x\].*--no-bff",     flags_raw, re.I): flags.append("--no-bff")
+          if re.search(r"\[x\].*--no-frontend", flags_raw, re.I): flags.append("--no-frontend")
+          if re.search(r"\[x\].*--mobile",      flags_raw, re.I): flags.append("--mobile")
+          # Safe-filter extra flags: alphanums, hyphens, spaces, quotes, dots, = underscores
+          safe_extra = re.sub(r"[^a-zA-Z0-9\-_ \"'.=]", "", extra_raw).strip()
+          if safe_extra:
+              flags.append(safe_extra)
+
+          if errors:
+              for e in errors:
+                  print(f"::error::{e}", file=sys.stderr)
               sys.exit(1)
 
-          req_file = f"/tmp/requirements_{issue_num}.txt"
-          with open(req_file, "w") as f:
+          # Write requirements to temp file (re-extracted in run-pipeline job)
+          issue_num = os.environ.get("ISSUE_NUMBER", "0")
+          req_file  = f"/tmp/requirements_{issue_num}.txt"
+          with open(req_file, "w", encoding="utf-8") as f:
               f.write(requirements)
 
-          gho = os.environ.get("GITHUB_OUTPUT", "/dev/stdout")
+          gho = os.environ.get("GITHUB_OUTPUT", "/dev/null")
           with open(gho, "a") as out:
               out.write(f"project_name={project_name}\n")
               out.write(f"model={model}\n")
               out.write(f"visibility={visibility}\n")
               out.write(f"flags={' '.join(flags)}\n")
-              out.write(f"req_file={req_file}\n")
 
-          print(f"project_name={project_name}")
-          print(f"model={model}")
-          print(f"flags={' '.join(flags)}")
-          print(f"req_file={req_file}")
+          print(f"✓ project_name={project_name}  model={model}")
+          print(f"✓ visibility={visibility}  flags={' '.join(flags)}")
+          print(f"✓ requirements={len(requirements)} chars → {req_file}")
           PYEOF
 
+      - name: Post parse failure comment
+        if: failure()
+        continue-on-error: true
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.PIPELINE_GITHUB_PAT }}
+          script: |
+            const run_url = `${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: [
+                '## ⚠️ Pipeline could not start — validation failed',
+                '',
+                'The issue body could not be parsed or is invalid. Common causes:',
+                '- **Project Name** is empty or contains only punctuation',
+                '- **Requirements** field is empty or too short (< 20 chars)',
+                '- **Missing secrets** — a repo admin must add `PIPELINE_GITHUB_PAT` and `PIPELINE_API_KEY`',
+                '',
+                `See [run log](${run_url}) for the exact error.`,
+                '',
+                '**To retry:** fix the issue body, then remove and re-add the `run-pipeline` label.',
+              ].join('\n')
+            });
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number, name: 'run-pipeline'
+            }).catch(() => {});
+
+  # ── JOB 2: run pipeline, publish, release ────────────────────────────────
   run-pipeline:
     needs: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 90   # Haiku + 3 review iters on 36 files ≈ 30 min; 3× headroom
     env:
       PROJECT_NAME: ${{ needs.gate.outputs.project_name }}
       OUTPUT_REPO:  ${{ github.repository_owner }}/${{ needs.gate.outputs.project_name }}
@@ -110,174 +181,262 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
+      # Temp files don't survive between jobs — re-extract requirements here
       - name: Write requirements file
         env:
-          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_BODY:   ${{ github.event.issue.body }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           python3 - <<'PYEOF'
           import os, re
-          body = os.environ["ISSUE_BODY"]
-          issue_num = os.environ["ISSUE_NUMBER"]
-          pattern = r"### Requirements\s*\n+(.*?)(?=\n###|\Z)"
-          m = re.search(pattern, body, re.DOTALL)
+          body      = os.environ.get("ISSUE_BODY", "")
+          issue_num = os.environ.get("ISSUE_NUMBER", "0")
+          m = re.search(r"### Requirements\s*\r?\n+(.*?)(?=\r?\n###|\Z)", body, re.DOTALL)
           reqs = m.group(1).strip() if m else body
+          reqs = re.sub(r"^```[a-z]*\s*", "", reqs)
+          reqs = re.sub(r"\s*```$", "", reqs).strip()
           req_file = f"/tmp/requirements_{issue_num}.txt"
-          with open(req_file, "w") as f:
+          with open(req_file, "w", encoding="utf-8") as f:
               f.write(reqs)
           print(f"Wrote {len(reqs)} chars to {req_file}")
           PYEOF
 
+      # capture exit code — do NOT use set -e so partial artifacts always upload
       - name: Run pipeline
+        id: pipeline
         env:
           PIPELINE_API_KEY:  ${{ secrets.PIPELINE_API_KEY }}
           PIPELINE_BASE_URL: ${{ vars.PIPELINE_BASE_URL }}
           PIPELINE_MODEL:    ${{ needs.gate.outputs.model }}
-          GH_TOKEN:          ${{ secrets.PIPELINE_GITHUB_PAT || secrets.GITHUB_TOKEN }}
         run: |
+          set +e
           python main.py \
             --requirements "/tmp/requirements_${{ github.event.issue.number }}.txt" \
             --project-name "${{ env.PROJECT_NAME }}" \
-            --model "${{ needs.gate.outputs.model }}" \
+            --model        "${{ needs.gate.outputs.model }}" \
             --auto \
             ${{ needs.gate.outputs.flags }}
+          PIPELINE_EXIT=$?
+          # Export run dir for all subsequent steps
+          RUN_DIR=$(ls -d artifacts/${PROJECT_NAME}_run_* 2>/dev/null | sort | tail -1)
+          echo "pipeline_exit=$PIPELINE_EXIT" >> "$GITHUB_OUTPUT"
+          echo "run_dir=${RUN_DIR:-}"         >> "$GITHUB_OUTPUT"
+          echo "Pipeline exit=$PIPELINE_EXIT  run_dir=${RUN_DIR:-<not found>}"
+          exit $PIPELINE_EXIT
 
-      # ── Publish generated code to a new repo ───────────────────────────────
-      - name: Create output repo (or skip if exists)
+      # Always upload — partial run is resumable
+      - name: Upload pipeline artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-run-${{ github.run_number }}
+          path: |
+            ${{ steps.pipeline.outputs.run_dir != '' && steps.pipeline.outputs.run_dir || 'artifacts/' }}
+          retention-days: 90
+          if-no-files-found: warn
+
+      # Create output repo — idempotent
+      - name: Create output repo
+        if: success()
+        id: create_repo
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_GITHUB_PAT }}
         run: |
-          gh repo create "${{ env.OUTPUT_REPO }}" \
-            --${{ needs.gate.outputs.visibility }} \
-            --description "Generated by llm-sdlc-workflow — issue #${{ github.event.issue.number }}" \
-            || echo "Repo already exists — will push to existing repo"
+          if gh repo view "${{ env.OUTPUT_REPO }}" > /dev/null 2>&1; then
+            echo "Repo ${{ env.OUTPUT_REPO }} already exists — reusing"
+            echo "created=existing" >> "$GITHUB_OUTPUT"
+          else
+            if gh repo create "${{ env.OUTPUT_REPO }}" \
+                 --${{ needs.gate.outputs.visibility }} \
+                 --description "Generated by llm-sdlc-workflow — issue #${{ github.event.issue.number }}"; then
+              echo "created=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "::error::Could not create ${{ env.OUTPUT_REPO }} — check PIPELINE_GITHUB_PAT has 'repo' scope"
+              exit 1
+            fi
+          fi
 
       - name: Push generated code to output repo
+        if: success()
+        id: push_code
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_GITHUB_PAT }}
         run: |
-          # Find the generated code directory
-          RUN_DIR=$(ls -d artifacts/${PROJECT_NAME}_run_* 2>/dev/null | sort | tail -1)
+          RUN_DIR="${{ steps.pipeline.outputs.run_dir }}"
           CODE_DIR="${RUN_DIR}/${PROJECT_NAME}"
 
           if [ ! -d "$CODE_DIR" ]; then
-            echo "ERROR: Could not find generated code at $CODE_DIR"
-            ls artifacts/ || true
+            echo "::error::Generated code not found at: $CODE_DIR"
+            ls -la "${RUN_DIR}/" 2>/dev/null || echo "(run dir not accessible)"
             exit 1
           fi
+
+          FILE_COUNT=$(find "$CODE_DIR" -type f | wc -l | tr -d ' ')
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "::error::Generated code directory is empty: $CODE_DIR"
+            exit 1
+          fi
+          echo "Pushing $FILE_COUNT generated files"
 
           cd "$CODE_DIR"
           git init -b main
           git config user.email "pipeline-bot@github-actions"
           git config user.name  "LLM SDLC Pipeline"
           git add -A
-          git commit -m "feat: initial project generated by llm-sdlc-workflow
+          git commit -m "feat: initial project from llm-sdlc-workflow
 
-          Source: ${{ github.repository }}#${{ github.event.issue.number }}
-          Pipeline run: ${{ github.run_id }}
-          Model: ${{ needs.gate.outputs.model }}"
+          Issue : ${{ github.repository }}#${{ github.event.issue.number }}
+          Run   : ${{ github.run_id }} (#${{ github.run_number }})
+          Model : ${{ needs.gate.outputs.model }}
+          Flags : ${{ needs.gate.outputs.flags }}"
 
-          git remote add origin https://x-access-token:${GH_TOKEN}@github.com/${{ env.OUTPUT_REPO }}.git
-          git push -u origin main --force
+          REMOTE="https://x-access-token:${GH_TOKEN}@github.com/${{ env.OUTPUT_REPO }}.git"
+          git remote add origin "$REMOTE"
 
-      # ── Upload all artifacts (JSON + DECISIONS_LOG.md) ─────────────────────
-      - name: Upload pipeline artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pipeline-run-${{ github.run_number }}
-          path: artifacts/
-          retention-days: 90
+          for attempt in 1 2 3; do
+            if git push -u origin main --force; then
+              echo "pushed=true" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            [ $attempt -lt 3 ] && echo "Push attempt $attempt failed — retrying in 15s…" && sleep 15
+            [ $attempt -eq 3 ] && echo "::error::Push failed after 3 attempts" && exit 1
+          done
 
-      - name: Create GitHub Release with pipeline artifacts
-        if: success()
+      # Delete orphaned empty repo only if WE just created it and the push failed
+      - name: Delete orphaned repo on push failure
+        if: failure() && steps.create_repo.outputs.created == 'true'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.PIPELINE_GITHUB_PAT }}
         run: |
-          RUN_DIR=$(ls -d artifacts/${PROJECT_NAME}_run_* 2>/dev/null | sort | tail -1)
-          DECISIONS_LOG="${RUN_DIR}/DECISIONS_LOG.md"
-          REPORT="${RUN_DIR}/00_pipeline_report.json"
+          echo "Deleting empty output repo ${{ env.OUTPUT_REPO }} to avoid orphan…"
+          gh repo delete "${{ env.OUTPUT_REPO }}" --yes || echo "Could not delete (may already be gone)"
 
-          # Build release notes
-          NOTES="## Pipeline Run #${{ github.run_number }}\n\n"
-          NOTES+="**Source issue:** ${{ github.repository }}#${{ github.event.issue.number }}\n"
-          NOTES+="**Actions run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n"
+      # Release is non-critical — code is already in the repo
+      - name: Create GitHub Release with artifacts
+        if: success()
+        id: release
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PIPELINE_GITHUB_PAT }}
+        run: |
+          RUN_DIR="${{ steps.pipeline.outputs.run_dir }}"
+          TAG="pipeline-run-${{ github.run_number }}"
+          DECISIONS_LOG="${RUN_DIR}/DECISIONS_LOG.md"
+
+          # Truncate notes — GitHub enforces a ~125 kB limit
           if [ -f "$DECISIONS_LOG" ]; then
-            NOTES+="$(cat "$DECISIONS_LOG")"
+            NOTES_BODY=$(head -c 50000 "$DECISIONS_LOG")
+          else
+            NOTES_BODY="*(DECISIONS_LOG.md not found in this run)*"
           fi
 
-          # Zip the full run directory
-          zip -r "pipeline-run-${{ github.run_number }}.zip" "$RUN_DIR/"
+          HEADER="## Pipeline Run #${{ github.run_number }}
+          | | |
+          |---|---|
+          | Source issue | ${{ github.repository }}#${{ github.event.issue.number }} |
+          | Actions run  | [link](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |
+          | Model        | ${{ needs.gate.outputs.model }} |
 
-          gh release create "pipeline-run-${{ github.run_number }}" \
-            "pipeline-run-${{ github.run_number }}.zip" \
-            --repo "${{ env.OUTPUT_REPO }}" \
+          ---
+          "
+          # Zip only JSON/log artifacts (skip generated source to keep zip small)
+          zip -r "${TAG}.zip" "$RUN_DIR/" \
+            --exclude "${RUN_DIR}/${PROJECT_NAME}/*" 2>/dev/null || \
+          zip -r "${TAG}.zip" "$RUN_DIR/"
+
+          # Delete existing tag if present (idempotent)
+          gh release view "$TAG" --repo "${{ env.OUTPUT_REPO }}" > /dev/null 2>&1 && \
+            gh release delete "$TAG" --repo "${{ env.OUTPUT_REPO }}" --yes || true
+
+          gh release create "$TAG" "${TAG}.zip" \
+            --repo  "${{ env.OUTPUT_REPO }}" \
             --title "Pipeline run #${{ github.run_number }}" \
-            --notes "$(printf '%b' "$NOTES")"
+            --notes "${HEADER}${NOTES_BODY}"
 
-      # ── Post result comment on the original issue ──────────────────────────
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # ── Final comments ──────────────────────────────────────────────────────
       - name: Post success comment
         if: success()
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.PIPELINE_GITHUB_PAT || secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.PIPELINE_GITHUB_PAT }}
           script: |
-            const owner = context.repo.owner;
-            const repo  = context.repo.repo;
-            const run_url = `${{ github.server_url }}/${owner}/${repo}/actions/runs/${{ github.run_id }}`;
-            const out_repo = `https://github.com/${owner}/${{ env.PROJECT_NAME }}`;
-            const release_url = `${out_repo}/releases/tag/pipeline-run-${{ github.run_number }}`;
+            const owner      = context.repo.owner;
+            const repo       = context.repo.repo;
+            const run_url    = `${{ github.server_url }}/${owner}/${repo}/actions/runs/${{ github.run_id }}`;
+            const out_repo   = `https://github.com/${owner}/${{ env.PROJECT_NAME }}`;
+            const tag        = '${{ steps.release.outputs.tag }}';
+            const rel_url    = tag ? `${out_repo}/releases/tag/${tag}` : null;
+            const resume_url = `${{ github.server_url }}/${owner}/${repo}/actions/workflows/pipeline-resume.yml`;
+
             await github.rest.issues.createComment({
-              owner, repo,
-              issue_number: context.issue.number,
+              owner, repo, issue_number: context.issue.number,
               body: [
                 '## ✅ Pipeline completed successfully',
                 '',
-                `| | |`,
-                `|---|---|`,
+                '| | |',
+                '|---|---|',
                 `| **Generated repo** | [${owner}/${{ env.PROJECT_NAME }}](${out_repo}) |`,
-                `| **Artifacts + DECISIONS_LOG.md** | [Release pipeline-run-${{ github.run_number }}](${release_url}) |`,
+                rel_url
+                  ? `| **Artifacts + DECISIONS_LOG** | [pipeline-run-${{ github.run_number }}](${rel_url}) |`
+                  : '| **Artifacts** | See Actions run (release skipped) |',
                 `| **Actions run** | [#${{ github.run_number }}](${run_url}) |`,
                 '',
                 '---',
-                '**To resume from a specific stage** (e.g. after a review failure):',
-                `Run the [Resume Pipeline](${context.server_url}/${owner}/${repo}/actions/workflows/pipeline-resume.yml) workflow`,
-                `with **Run artifact name** = \`pipeline-run-${{ github.run_number }}\` and **Issue number** = \`#${context.issue.number}\`.`,
+                '**To resume from a specific stage:**',
+                `Go to [Resume Pipeline](${resume_url}) and set:`,
+                `- **artifact name** → \`pipeline-run-${{ github.run_number }}\``,
+                `- **issue number** → \`${{ github.event.issue.number }}\``,
               ].join('\n')
             });
-            // Remove the run-pipeline label so re-labelling triggers a fresh run
             await github.rest.issues.removeLabel({
-              owner, repo,
-              issue_number: context.issue.number,
-              name: 'run-pipeline'
-            }).catch(() => {});  // ignore if already removed
+              owner, repo, issue_number: context.issue.number, name: 'run-pipeline'
+            }).catch(() => {});
 
       - name: Post failure comment
         if: failure()
+        continue-on-error: true
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.PIPELINE_GITHUB_PAT || secrets.GITHUB_TOKEN }}
+          github-token: ${{ secrets.PIPELINE_GITHUB_PAT }}
           script: |
-            const owner = context.repo.owner;
-            const repo  = context.repo.repo;
-            const run_url = `${{ github.server_url }}/${owner}/${repo}/actions/runs/${{ github.run_id }}`;
+            const owner       = context.repo.owner;
+            const repo        = context.repo.repo;
+            const run_url     = `${{ github.server_url }}/${owner}/${repo}/actions/runs/${{ github.run_id }}`;
+            const resume_url  = `${{ github.server_url }}/${owner}/${repo}/actions/workflows/pipeline-resume.yml`;
+            const pipelineExit = '${{ steps.pipeline.outputs.pipeline_exit }}';
+            const pushedCode   = '${{ steps.push_code.outputs.pushed }}';
+
+            let diagnosis = '';
+            if (pipelineExit && pipelineExit !== '0') {
+              diagnosis = '\n\n**Diagnosis:** LLM pipeline failed (review loop likely exhausted max iterations without passing). ' +
+                'Partial artifacts were uploaded — you can resume from the last good stage.';
+            } else if (!pushedCode) {
+              diagnosis = '\n\n**Diagnosis:** Pipeline succeeded but code push to output repo failed. ' +
+                'The orphaned empty repo was deleted. Artifacts are in the Actions run.';
+            }
+
             await github.rest.issues.createComment({
-              owner, repo,
-              issue_number: context.issue.number,
+              owner, repo, issue_number: context.issue.number,
               body: [
                 '## ❌ Pipeline failed',
+                `**Actions run (with full logs):** [#${{ github.run_number }}](${run_url})`,
+                diagnosis,
                 '',
-                `**Actions run (with logs):** [#${{ github.run_number }}](${run_url})`,
+                '---',
+                '**Option 1 — Resume from a specific stage:**',
+                `Go to [Resume Pipeline](${resume_url}) and set:`,
+                `- **artifact name** → \`pipeline-run-${{ github.run_number }}\``,
+                `- **issue number** → \`${{ github.event.issue.number }}\``,
+                '- Choose the stage to resume from (e.g. `review` or `engineering`)',
                 '',
-                '**To retry from a specific stage** without starting over:',
-                `1. Download the artifact \`pipeline-run-${{ github.run_number }}\` from the run above`,
-                `2. Run the [Resume Pipeline](${context.server_url}/${owner}/${repo}/actions/workflows/pipeline-resume.yml) workflow`,
-                '',
-                '**To start fresh:** remove and re-add the `run-pipeline` label on this issue.',
+                '**Option 2 — Start fresh:**',
+                'Remove then re-add the `run-pipeline` label.',
               ].join('\n')
             });
             await github.rest.issues.removeLabel({
-              owner, repo,
-              issue_number: context.issue.number,
-              name: 'run-pipeline'
+              owner, repo, issue_number: context.issue.number, name: 'run-pipeline'
             }).catch(() => {});
