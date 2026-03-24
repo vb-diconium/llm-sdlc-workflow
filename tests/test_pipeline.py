@@ -493,3 +493,144 @@ class TestPrintSummary:
         result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
         result.errors = ["LLM rate limit", "Docker timeout"]
         p.print_summary(result)  # must not raise
+
+
+# ─── Decision log ─────────────────────────────────────────────────────────────
+
+
+from llm_sdlc_workflow.models.artifacts import ArchitectureArtifact, DecisionRecord
+
+
+def _make_decision(decision="Use JWT", rationale="Industry standard", alts=None, trade_offs=None):
+    return DecisionRecord(
+        decision=decision,
+        rationale=rationale,
+        alternatives_considered=alts or ["Session cookies", "API keys"],
+        trade_offs=trade_offs or ["Stateless but needs secret rotation"],
+    )
+
+
+class TestDecisionLog:
+    def test_write_decision_log_creates_file(self, tmp_path):
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        p._write_decision_log(result)
+        assert (tmp_path / "DECISIONS_LOG.md").exists()
+
+    def test_write_decision_log_includes_project_name(self, tmp_path):
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False, project_name="myapp")
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        p._write_decision_log(result)
+        content = (tmp_path / "DECISIONS_LOG.md").read_text()
+        assert "myapp" in content
+
+    def test_write_decision_log_with_no_decisions_says_none_recorded(self, tmp_path):
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        p._write_decision_log(result)
+        content = (tmp_path / "DECISIONS_LOG.md").read_text()
+        assert "No decisions" in content or "no decisions" in content.lower()
+
+    def test_write_decision_log_renders_discovery_decisions(self, tmp_path):
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        result.intent = _make_discovery()
+        result.intent.decisions = [_make_decision("Use REST not GraphQL", "Simpler client integration")]
+        p._write_decision_log(result)
+        content = (tmp_path / "DECISIONS_LOG.md").read_text()
+        assert "Use REST not GraphQL" in content
+        assert "Simpler client integration" in content
+        assert "Stage 1" in content
+        assert "DiscoveryAgent" in content
+
+    def test_write_decision_log_renders_architecture_decisions(self, tmp_path):
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        arch = MagicMock(spec=ArchitectureArtifact)
+        arch.design_decisions = [_make_decision("Monorepo over microservices", "Simpler ops")]
+        arch.components = []
+        arch.architecture_style = "Monolith"
+        result.architecture = arch
+        p._write_decision_log(result)
+        content = (tmp_path / "DECISIONS_LOG.md").read_text()
+        assert "Monorepo over microservices" in content
+        assert "Simpler ops" in content
+        assert "ArchitectureAgent" in content
+
+    def test_write_decision_log_renders_alternatives(self, tmp_path):
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        result.intent = _make_discovery()
+        result.intent.decisions = [
+            _make_decision(alts=["Session cookies", "API keys", "mTLS"])
+        ]
+        p._write_decision_log(result)
+        content = (tmp_path / "DECISIONS_LOG.md").read_text()
+        assert "Session cookies" in content
+        assert "API keys" in content
+        assert "mTLS" in content
+        assert "Alternatives" in content
+
+    def test_write_decision_log_renders_trade_offs(self, tmp_path):
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        result.intent = _make_discovery()
+        result.intent.decisions = [
+            _make_decision(trade_offs=["Requires secret rotation", "Token replay risk"])
+        ]
+        p._write_decision_log(result)
+        content = (tmp_path / "DECISIONS_LOG.md").read_text()
+        assert "Requires secret rotation" in content
+        assert "Token replay risk" in content
+        assert "Trade-offs" in content
+
+    def test_write_decision_log_skips_stages_with_no_decisions(self, tmp_path):
+        """Stages with empty decisions should not produce a section header."""
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        result.intent = _make_discovery()
+        result.intent.decisions = [_make_decision("Only discovery decision")]
+        p._write_decision_log(result)
+        content = (tmp_path / "DECISIONS_LOG.md").read_text()
+        assert "Stage 1" in content           # discovery has a decision
+        assert "Stage 2" not in content       # architecture has none — should be omitted
+        assert "Only discovery decision" in content
+
+    def test_write_decision_log_includes_review_decisions_from_all_iterations(self, tmp_path):
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        rev1 = _make_review(passed=False, iteration=1)
+        rev1.decisions = [_make_decision("Flag port mismatch as critical")]
+        rev2 = _make_review(passed=True, iteration=2)
+        rev2.decisions = [_make_decision("Mark CORS issue resolved")]
+        result.review_iterations = [rev1, rev2]
+        p._write_decision_log(result)
+        content = (tmp_path / "DECISIONS_LOG.md").read_text()
+        assert "Flag port mismatch as critical" in content
+        assert "Mark CORS issue resolved" in content
+
+    def test_write_decision_log_total_count_in_table(self, tmp_path):
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        result.intent = _make_discovery()
+        result.intent.decisions = [_make_decision(), _make_decision("Decision 2")]
+        p._write_decision_log(result)
+        content = (tmp_path / "DECISIONS_LOG.md").read_text()
+        assert "2" in content  # total decisions count appears in table
+
+    def test_print_decisions_does_not_raise_on_empty_list(self, tmp_path):
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        p._print_decisions("TestAgent", [])  # must not raise
+
+    def test_print_decisions_does_not_raise_on_populated_list(self, tmp_path):
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        decisions = [_make_decision(), _make_decision("Second decision"), _make_decision("Third")]
+        p._print_decisions("TestAgent", decisions, max_show=2)  # must not raise
+
+    def test_save_report_also_writes_decision_log(self, tmp_path):
+        """_save_report should trigger _write_decision_log, creating DECISIONS_LOG.md."""
+        p = Pipeline(artifacts_dir=str(tmp_path), human_checkpoints=False)
+        result = PipelineResult(requirements="x", started_at="2026-01-01T00:00:00")
+        result.completed_at = "2026-01-01T00:01:00"
+        p._save_report(result)
+        assert (tmp_path / "DECISIONS_LOG.md").exists()

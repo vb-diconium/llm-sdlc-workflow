@@ -367,6 +367,7 @@ class Pipeline:
                 self._step_header("Step 1", "Discovery Agent", "Analysing requirements, goals, constraints and risks")
                 result.intent = await self.discovery_agent.run(requirements)
                 self._step_done("Discovery", len(result.intent.requirements), "requirements extracted")
+                self._print_decisions("Discovery", result.intent.decisions)
                 await self._await_human(
                     checkpoint="Checkpoint 1 — Requirements Validated",
                     details=[
@@ -414,6 +415,7 @@ class Pipeline:
                 self._step_done(
                     "Architecture", len(result.architecture.components), "components designed"
                 )
+                self._print_decisions("Architecture", result.architecture.design_decisions)
 
                 self._step_header(
                     f"Testing [Stage 1, iter {_arch_iter}]", "Testing Agent",
@@ -504,6 +506,7 @@ class Pipeline:
                     "Spec", len(result.generated_spec.generated_spec_files),
                     f"spec files — services: [{services}]  ports: {ports}"
                 )
+                self._print_decisions("Spec", result.generated_spec.decisions)
 
                 _spec_dir = os.path.join(self.artifacts_dir, self.project_name, "specs")
                 _openapi_lines = len((result.generated_spec.openapi_spec or "").splitlines())
@@ -546,10 +549,12 @@ class Pipeline:
                     ),
                 )
                 self._step_done("Engineering", len(result.engineering.generated_files), "files generated")
+                self._print_decisions("Engineering", result.engineering.decisions)
                 self._step_done(
                     "Infrastructure (plan)", len(result.infra_plan.iac_files),
                     "IaC files written (containers start after review loop)"
                 )
+                self._print_decisions("Infrastructure", result.infra_plan.decisions)
 
             # ── Step 6: Review loop ─────────────────────────────────────────
             previous_feedback = None
@@ -1003,6 +1008,117 @@ class Pipeline:
     def _step_done(self, name: str, count: int, label: str) -> None:
         console.print(f"[green]✅ {name} complete — {count} {label}[/green]\n")
 
+    def _print_decisions(self, agent_name: str, decisions: list, max_show: int = 2) -> None:
+        """Print a compact decision summary to console after each stage."""
+        if not decisions:
+            return
+        log_path = os.path.join(self.artifacts_dir, "DECISIONS_LOG.md")
+        console.print(f"[dim]💡 {agent_name} — {len(decisions)} decision(s) recorded:[/dim]")
+        for d in decisions[:max_show]:
+            dec = d.decision if hasattr(d, "decision") else str(d.get("decision", ""))
+            rat = d.rationale if hasattr(d, "rationale") else str(d.get("rationale", ""))
+            alts = (d.alternatives_considered if hasattr(d, "alternatives_considered")
+                    else d.get("alternatives_considered", []))
+            console.print(f"[dim]   · {dec[:100]}{'...' if len(dec) > 100 else ''}[/dim]")
+            if rat:
+                console.print(f"[dim]     └ Rationale: {rat[:90]}{'...' if len(rat) > 90 else ''}[/dim]")
+            if alts:
+                alts_str = " / ".join(a[:45] for a in alts[:3])
+                console.print(f"[dim]     └ Alternatives: {alts_str}[/dim]")
+        remaining = len(decisions) - max_show
+        if remaining > 0:
+            console.print(f"[dim]   … {remaining} more → {log_path}[/dim]")
+        console.print()
+
+    def _write_decision_log(self, result: "PipelineResult") -> None:
+        """Write DECISIONS_LOG.md — a human-readable log of every agent decision.
+
+        Each entry records:
+        - What was decided (the decision text)
+        - Why it was decided (the rationale)
+        - What alternatives were considered and rejected
+        - Trade-offs that were accepted
+        """
+        def _decs(obj, field: str) -> list:
+            if obj is None:
+                return []
+            return getattr(obj, field, []) or []
+
+        review_decisions = [
+            d for rev in (result.review_iterations or []) for d in _decs(rev, "decisions")
+        ]
+
+        stages: list[tuple[str, str, list]] = [
+            ("Stage 1 — Discovery",           "DiscoveryAgent",        _decs(result.intent,          "decisions")),
+            ("Stage 2 — Architecture",         "ArchitectureAgent",     _decs(result.architecture,    "design_decisions")),
+            ("Stage 3 — Spec",                 "SpecAgent",             _decs(result.generated_spec,  "decisions")),
+            ("Stage 4 — Engineering",           "EngineeringAgent",      _decs(result.engineering,     "decisions")),
+            ("Stage 5 — Infrastructure (plan)", "InfrastructureAgent",   _decs(result.infra_plan,      "decisions")),
+            ("Stage 5 — Infrastructure (apply)","InfrastructureAgent",   _decs(result.infra_apply,     "decisions")),
+            ("Stage 6 — Review",                "ReviewAgent",           review_decisions),
+            ("Stage 7 — Deployment",            "DeploymentAgent",       _decs(result.deployment,      "decisions")),
+        ]
+
+        total = sum(len(d) for _, _, d in stages)
+        status = "✅ Passed" if result.passed else "⚠️  Did not fully pass"
+
+        lines: list[str] = [
+            f"# Agent Decision Log — {self.project_name}",
+            "",
+            f"| Field | Value |",
+            f"|-------|-------|",
+            f"| Run started | {result.started_at} |",
+            f"| Pipeline | {status} |",
+            f"| Total decisions | {total} |",
+            "",
+            "Each section captures decisions made by one agent: what was decided, "
+            "why it was decided, what alternatives were considered, and the trade-offs accepted.",
+            "",
+            "---",
+            "",
+        ]
+
+        for stage_title, agent_name, decisions in stages:
+            if not decisions:
+                continue  # skip stages with no decisions to keep the log focused
+            lines += [
+                f"## {stage_title}",
+                f"*Agent: {agent_name} — {len(decisions)} decision(s)*",
+                "",
+            ]
+            for i, d in enumerate(decisions, 1):
+                dec = d.decision if hasattr(d, "decision") else str(d.get("decision", "(no text)"))
+                rat = d.rationale if hasattr(d, "rationale") else str(d.get("rationale", ""))
+                alts = (d.alternatives_considered if hasattr(d, "alternatives_considered")
+                        else d.get("alternatives_considered", []))
+                trade_offs = (d.trade_offs if hasattr(d, "trade_offs")
+                              else d.get("trade_offs", []))
+                lines.append(f"### {i}. {dec}")
+                lines.append("")
+                if rat:
+                    lines += [f"**Rationale**: {rat}", ""]
+                if alts:
+                    lines.append("**Alternatives considered**:")
+                    lines.extend(f"- {a}" for a in alts)
+                    lines.append("")
+                if trade_offs:
+                    lines.append("**Trade-offs**:")
+                    lines.extend(f"- {t}" for t in trade_offs)
+                    lines.append("")
+            lines += ["---", ""]
+
+        if total == 0:
+            lines += [
+                "_No decisions were recorded in this run. "
+                "Agents may not have returned DecisionRecord entries._",
+                "",
+            ]
+
+        path = os.path.join(self.artifacts_dir, "DECISIONS_LOG.md")
+        with open(path, "w") as f:
+            f.write("\n".join(lines))
+        console.print(f"[dim]📋 Decision log saved → {path}  ({total} decisions across {sum(1 for _, _, d in stages if d)} stages)[/dim]")
+
     def _testing_status(self, stage: str, artifact: TestingArtifact) -> None:
         icon = "✅" if artifact.passed else "❌"
         color = "green" if artifact.passed else "red"
@@ -1061,6 +1177,7 @@ class Pipeline:
         with open(path, "w") as f:
             json.dump(report, f, indent=2)
         console.print(f"\n[dim]📊 Pipeline report saved → {path}[/dim]")
+        self._write_decision_log(result)
 
     def print_summary(self, result: PipelineResult) -> None:
         table = Table(title="Pipeline Run Summary", show_header=True, header_style="bold magenta")
