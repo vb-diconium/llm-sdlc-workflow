@@ -27,6 +27,7 @@ from llm_sdlc_workflow.models.artifacts import (
     DiscoveryArtifact,
     ReviewFeedback,
 )
+from llm_sdlc_workflow.config import TopologyContract
 from .base_agent import BaseAgent, load_prompt
 
 SYSTEM_PROMPT = load_prompt("infrastructure_agent.md")
@@ -46,6 +47,7 @@ class InfrastructureAgent(BaseAgent):
         review_feedback: Optional[ReviewFeedback] = None,
         iteration: int = 1,
         skip_start: bool = False,
+        topology: Optional[TopologyContract] = None,
     ) -> InfrastructureArtifact:
         """
         Generate IaC via chunked LLM calls, write files, start containers,
@@ -64,6 +66,8 @@ class InfrastructureAgent(BaseAgent):
                 lines.extend(f"- {i}" for i in review_feedback.high_issues)
             feedback_section = "\n".join(lines)
 
+        topology_section = topology.topology_section() if topology else ""
+
         plan_message = f"""Generate Infrastructure as Code to containerise this application.
 
 ## Discovery Summary
@@ -74,6 +78,7 @@ class InfrastructureAgent(BaseAgent):
 
 ## Engineering Summary (stack already generated)
 {self._compact(engineering)}
+{topology_section}
 {feedback_section}
 
 The generated application files already exist in the working directory.
@@ -88,7 +93,8 @@ This is a json response."""
             "Purpose: {purpose}\n\n"
             "## Context\n"
             "Backend: Kotlin/Java Spring Boot 3 (Gradle) | Frontend: React 18 + Vite (Node)\n"
-            "Architecture: {arch_style}\n\n"
+            "Architecture: {arch_style}\n"
+            "{topology_hint}\n\n"
             "Return JSON: {{\"content\": \"<full file text>\"}}\n"
             "No truncation, no placeholders. Valid json response."
         )
@@ -101,8 +107,13 @@ This is a json response."""
             fill_message_tmpl=fill_message_tmpl,
             fill_context={
                 "arch_style": getattr(architecture, "architecture_style", "microservices"),
+                "topology_hint": topology_section if topology_section else "",
             },
         )
+
+        # Enforce primary_service_port from topology contract
+        if topology is not None:
+            artifact.primary_service_port = topology.primary_port
 
         artifact.review_iteration = iteration
         if review_feedback:

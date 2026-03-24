@@ -101,7 +101,7 @@ class EngineeringAgent(BaseAgent):
               for a in active.values()]
         )
         service_artifacts = dict(zip(active.keys(), results))
-        assembled = self._assemble(service_artifacts, iteration)
+        assembled = self._assemble(service_artifacts, iteration, contract)
         self.save_artifact(assembled, "03_engineering_artifact.json")
         return assembled
 
@@ -181,7 +181,7 @@ class EngineeringAgent(BaseAgent):
             ]
         )
         service_artifacts = dict(zip(active.keys(), results))
-        assembled = self._assemble(service_artifacts, next_iter)
+        assembled = self._assemble(service_artifacts, next_iter, contract)
         self.save_artifact(assembled, "03_engineering_artifact.json")
         return assembled
 
@@ -191,6 +191,7 @@ class EngineeringAgent(BaseAgent):
         self,
         service_artifacts: dict,  # {service_name: EngineeringArtifact}
         iteration: int,
+        contract: Optional[GeneratedSpecArtifact] = None,
     ) -> EngineeringArtifact:
         """Merge per-service artifacts into one flat EngineeringArtifact."""
         all_files = [f for a in service_artifacts.values() for f in a.generated_files]
@@ -215,7 +216,7 @@ class EngineeringAgent(BaseAgent):
             backend_tech=be.backend_tech if be else None,
             frontend_tech=fe.frontend_tech if fe else None,
             infrastructure=" + ".join(
-                f"{name} ({self._port_hint(name)})" for name in service_artifacts
+                f"{name} ({self._port_hint(name, contract)})" for name in service_artifacts
             ),
             generated_files=all_files,
             implementation_steps=all_steps,
@@ -232,7 +233,12 @@ class EngineeringAgent(BaseAgent):
         )
         return assembled
 
-    def _port_hint(self, service: str) -> str:
+    def _port_hint(self, service: str, contract: Optional[GeneratedSpecArtifact] = None) -> str:
+        # Prefer contract-derived ports (set authoritatively by pipeline from TopologyContract)
+        if contract and contract.service_ports and service in contract.service_ports:
+            p = contract.service_ports[service]
+            return str(p) if p else "N/A"
+        # Fallback defaults: match what TopologyContract.from_config() produces for the full stack
         defaults = {"backend": "8081", "bff": "8080", "frontend": "3000"}
         if service in defaults:
             return defaults[service]

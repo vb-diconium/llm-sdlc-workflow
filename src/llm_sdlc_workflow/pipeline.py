@@ -47,7 +47,7 @@ from llm_sdlc_workflow.agents import (
     SpecAgent,
     TestingAgent,
 )
-from llm_sdlc_workflow.config import PipelineConfig
+from llm_sdlc_workflow.config import PipelineConfig, TopologyContract
 from llm_sdlc_workflow.models.artifacts import (
     ArchitectureArtifact,
     DeploymentArtifact,
@@ -344,6 +344,9 @@ class Pipeline:
                 artifacts_dir=self.artifacts_dir,
             )
 
+        # Build topology contract from config — single source of truth for all agents
+        topology = TopologyContract.from_config(self.config)
+
         _action = f"Resuming from '{resume_from_stage}'" if resume_from_stage else "Starting"
         console.print(Panel(
             f"[bold]🚀 LLM SDLC Workflow {_action}[/bold]\n\n"
@@ -490,6 +493,9 @@ class Pipeline:
                 result.generated_spec = await self.spec_agent.run(
                     result.intent, result.architecture, existing_spec
                 )
+                # Enforce topology contract — authoritative over LLM-generated values
+                result.generated_spec.monorepo_services = topology.enabled_services
+                result.generated_spec.service_ports = topology.service_ports
                 services = ", ".join(result.generated_spec.monorepo_services)
                 ports = ", ".join(
                     f"{s}:{p}" for s, p in result.generated_spec.service_ports.items()
@@ -536,6 +542,7 @@ class Pipeline:
                         result.intent, result.architecture,
                         EngineeringArtifact(),
                         skip_start=True,
+                        topology=topology,
                     ),
                 )
                 self._step_done("Engineering", len(result.engineering.generated_files), "files generated")
@@ -684,6 +691,7 @@ class Pipeline:
                         intent=result.intent,
                         architecture=result.architecture,
                         engineering=result.engineering,
+                        topology=topology,
                     ),
                     self.deployment_agent.run(
                         intent=result.intent,
@@ -825,6 +833,7 @@ class Pipeline:
                 intent=result.intent,
                 architecture=result.architecture,
                 engineering=result.engineering,
+                topology=topology,
             )
             result.test_infrastructure = await self.testing_agent.run(
                 stage="infrastructure",

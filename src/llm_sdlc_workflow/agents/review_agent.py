@@ -34,7 +34,7 @@ _KEY_FILE_PATTERNS = (
     "client.ts", "homepage", "backendclient",
     "appconfig", "webconfig", "security",
 )
-_MAX_CONTENT_CHARS = 3000   # per file — truncated if longer
+_MAX_CONTENT_CHARS = 5000   # per file — increased to avoid truncating key config files
 _MAX_CONTENT_FILES = 30     # max files whose content we embed
 
 
@@ -117,9 +117,15 @@ class ReviewAgent(BaseAgent):
         prev_section = ""
         if previous_feedback and iteration > 1:
             prev_section = (
-                f"\n\n## Previous critical issues (must confirm as fixed or still present)\n"
+                f"\n\n## Issues flagged in the PREVIOUS iteration (for reference only)\n"
+                "IMPORTANT: You MUST review the CURRENT code shown above independently.\n"
+                "Do NOT assume these issues are still present — verify each one against the\n"
+                "actual file content shown above BEFORE including it in your report.\n"
+                "Only flag an issue if you can cite the EXACT line in the CURRENT code.\n"
+                "If the code was fixed, do NOT re-report it.\n\n"
+                "### Previous critical issues (verify in CURRENT code before flagging)\n"
                 + "\n".join(f"- {i}" for i in previous_feedback.critical_issues)
-                + "\n## Previous high issues\n"
+                + "\n### Previous high issues (verify in CURRENT code before flagging)\n"
                 + "\n".join(f"- {i}" for i in previous_feedback.high_issues)
             )
 

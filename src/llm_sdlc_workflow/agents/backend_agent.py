@@ -47,6 +47,12 @@ class BackendAgent(BaseAgent):
                 file_keys=["generated_files"],
             )
         else:
+            backend_port = contract.service_ports.get("backend", 8080) if contract.service_ports else 8080
+            is_internal = bool(contract.service_ports and (
+                contract.service_ports.get("bff") or contract.service_ports.get("frontend")
+            ))
+            port_role = "internal (sits behind BFF or frontend)" if is_internal else "external (directly exposed to clients)"
+
             plan_message = f"""Plan and list every file for the backend/ service.
 
 Tech stack: {self.tech_hint}
@@ -63,7 +69,10 @@ Return JSON with every file's content = "__PENDING__". Valid json."""
             fill_tmpl = (
                 f"Write COMPLETE, RUNNABLE {self.tech_hint} content for: {{path}}\n"
                 "Purpose: {purpose}\n"
-                "Service: backend (port 8081, internal)\n"
+                f"Service: backend  |  port: {backend_port}  ({port_role})\n"
+                f"EXPOSE {backend_port} in Dockerfile\n"
+                f"HEALTHCHECK must use port {backend_port}\n"
+                f"server.port={backend_port} in application.yml and CMD\n"
                 "Architecture: {arch_style}\n"
                 "Endpoints: {endpoints_summary}\n\n"
                 "Return JSON: {{\"content\": \"<full file>\"}}\n"

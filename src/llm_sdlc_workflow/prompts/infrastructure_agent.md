@@ -34,7 +34,8 @@ Given the intent, architecture, and engineering implementation, produce:
 ## README.md spec
 Must be a polished, complete document covering:
 - Project name, one-line description, badges (build, license placeholder)
-- Architecture diagram (ASCII) showing: Browser → Frontend (3000) → BFF (8080) → Backend (8081) → DB
+- Architecture diagram (ASCII) — use the diagram from the **Deployment topology** section provided in the context.
+- Do NOT substitute a generic 3-tier diagram if the actual topology is different (e.g. backend-only has no BFF or frontend).
 - Prerequisites: Docker ≥ 24, Docker Compose ≥ 2.20, JDK 21 (for local dev), Node 20 (for local dev)
 - Quick start: `docker compose up --build` — one command to run everything
 - Service table: name | port | description | health endpoint
@@ -96,7 +97,7 @@ GitHub Copilot workspace instructions. Must include:
 - Environment variables must have safe defaults so the stack starts without manual config.
 - Do NOT use `localhost` or `127.0.0.1` in inter-service URLs \u2014 use Docker Compose service names.
 - Single command to start everything: `docker compose up --build`.
-- `primary_service_port` = **host-side** port of the BFF (8080 \u2014 the externally-facing service).
+- `primary_service_port` = **host-side** port of the externally-exposed service, as specified in the **Deployment topology** section of the context.
 - `health_check_path` must return HTTP 2xx when service is ready.
 
 ## CRITICAL

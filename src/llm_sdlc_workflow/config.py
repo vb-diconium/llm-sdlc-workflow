@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 # ─── Component toggles ────────────────────────────────────────────────────────
@@ -201,3 +201,114 @@ class PipelineConfig:
             tech_parts.append(f"Mobile:{p}")
         tech_str = f"  [{', '.join(tech_parts)}]" if tech_parts else ""
         return f"Services: {', '.join(svcs)}{tech_str}"
+
+
+# ─── Topology contract ───────────────────────────────────────────────────────
+
+@dataclass
+class TopologyContract:
+    """
+    Computed once from PipelineConfig before any agent runs.
+
+    This is the single source of truth for which services exist, what ports
+    they use, and which service is externally exposed.  All agents receive
+    relevant fields from this contract so they never have to guess or hardcode.
+
+    Port assignment rules
+    ---------------------
+    - The externally-exposed service gets port 8080 (or 3000 for frontend).
+    - Internal services get sequential ports starting at 8081.
+
+    Topology        | backend | bff  | frontend | primary
+    ----------------|---------|------|----------|---------------------------
+    backend only    | 8080    |  —   |    —     | backend:8080
+    back + bff      | 8081    | 8080 |    —     | bff:8080
+    full 3-tier     | 8081    | 8082 | 3000     | frontend:3000→bff:8082→backend:8081
+    back + frontend | 8081    |  —   | 3000     | frontend:3000→backend:8081
+    """
+
+    enabled_services: List[str]          # e.g. ["backend"] or ["backend", "bff", "frontend"]
+    service_ports: Dict[str, int]        # {"backend": 8080} or {"backend": 8081, "bff": 8080, ...}
+    primary_service: str                 # externally-exposed service name
+    primary_port: int                    # host port clients connect to
+    has_bff: bool
+    has_frontend: bool
+    architecture_diagram: str            # ASCII string built from actual topology
+
+    @classmethod
+    def from_config(cls, cfg: "PipelineConfig") -> "TopologyContract":
+        services = cfg.enabled_services()
+        has_bff = cfg.components.bff
+        has_frontend = cfg.components.frontend
+
+        # Assign ports based on topology
+        ports: Dict[str, int] = {}
+        if "backend" in services:
+            # Backend is external (8080) only when it is the sole service
+            ports["backend"] = 8080 if (not has_bff and not has_frontend) else 8081
+        if "bff" in services:
+            ports["bff"] = 8080
+        if "frontend" in services:
+            ports["frontend"] = 3000
+        for svc in services:
+            if svc.startswith("mobile_"):
+                ports[svc] = 0  # mobile clients connect via URL, no server port
+
+        # Determine primary (externally-reachable) service and host port
+        if has_frontend:
+            primary, primary_port = "frontend", 3000
+        elif has_bff:
+            primary, primary_port = "bff", 8080
+        else:
+            primary, primary_port = "backend", 8080
+
+        diagram = cls._build_diagram(services, ports)
+
+        return cls(
+            enabled_services=services,
+            service_ports=ports,
+            primary_service=primary,
+            primary_port=primary_port,
+            has_bff=has_bff,
+            has_frontend=has_frontend,
+            architecture_diagram=diagram,
+        )
+
+    @staticmethod
+    def _build_diagram(services: List[str], ports: Dict[str, int]) -> str:
+        parts = ["Browser"]
+        for svc in ["frontend", "bff", "backend"]:
+            if svc in services:
+                p = ports.get(svc, "?")
+                parts.append(f"{svc.upper()} ({p})")
+        if "backend" in services:
+            parts.append("DB")
+        return " → ".join(parts)
+
+    def topology_section(self) -> str:
+        """Formatted string ready for injection into any agent prompt."""
+        lines = [
+            "## Deployment topology (authoritative — use EXACTLY these values)",
+            f"Services         : {', '.join(self.enabled_services)}",
+            f"Architecture     : {self.architecture_diagram}",
+            f"Primary service  : {self.primary_service} (host port {self.primary_port})",
+            "",
+            "Port assignments (use in EXPOSE, HEALTHCHECK, server.port, docker-compose):",
+        ]
+        for svc, port in self.service_ports.items():
+            if port == 0:
+                lines.append(f"  {svc}: N/A (mobile client, no server port)")
+                continue
+            role = (
+                "external — directly accessed by clients"
+                if svc == self.primary_service
+                else "internal — not directly exposed to host"
+            )
+            lines.append(f"  {svc}: {port}  [{role}]")
+        if self.has_bff and "backend" in self.service_ports and "bff" in self.service_ports:
+            lines.append(
+                f"\nInter-service URL (use Docker Compose service name, NOT localhost):"
+                f"\n  backend base URL as seen by bff: "
+                f"http://backend:{self.service_ports['backend']}"
+            )
+        return "\n".join(lines)

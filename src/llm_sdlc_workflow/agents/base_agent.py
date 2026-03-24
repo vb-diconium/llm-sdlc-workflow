@@ -118,6 +118,33 @@ def _make_client() -> AsyncOpenAI:
     return AsyncOpenAI(base_url=_BASE_URL, api_key=_get_api_key())
 
 
+def _issues_for_file(issues: List[str], file_path: str) -> List[str]:
+    """Return only the issues from *issues* that are relevant to *file_path*.
+
+    Relevance is determined by whether the issue text contains:
+    - The file's basename (e.g. "application.yml", "TodoController.kt")
+    - The file's parent directory component (e.g. "controller", "service")
+    - A keyword from the path that is long enough to be meaningful (>=6 chars)
+
+    If NO issues match the file, return ALL issues so the file still gets
+    reviewed for general improvements (e.g. .gitignore, gradle files).
+    """
+    import os as _os
+    basename = _os.path.basename(file_path).lower()
+    # e.g. "TodoController.kt" → ["todocontroller", "kt", "todo", "controller"]
+    path_parts = set(re.split(r"[./\\-]", file_path.lower()))
+    # Only use parts long enough to be meaningful
+    meaningful_parts = {p for p in path_parts if len(p) >= 5}
+    meaningful_parts.add(basename)
+
+    matched = [
+        issue for issue in issues
+        if any(part in issue.lower() for part in meaningful_parts)
+    ]
+    # Fall back to all issues if nothing matched (avoids silently skipping a file)
+    return matched if matched else issues
+
+
 class BaseAgent:
     def __init__(self, name: str, artifacts_dir: str = "./artifacts", generated_dir_name: str = "generated"):
         self.name = name
@@ -261,16 +288,11 @@ class BaseAgent:
         This prevents the "random regeneration" problem where the LLM introduces new bugs
         each review iteration because it cannot see the existing generated code.
         """
-        from llm_sdlc_workflow.models.artifacts import ReviewFeedback as _RF
+        from llm_sdlc_workflow.models.artifacts import ReviewFeedback as _RF  # noqa: F401
         console.print(Rule(f"[bold yellow]{self.name} (patch)[/bold yellow]"))
 
-        # Collect all issues (critical + high) into one bullet list
+        # Collect all issues (critical + high) into one list
         all_issues = list(feedback.critical_issues) + list(feedback.high_issues)
-        issues_str = (
-            "\n".join(f"  - {i}" for i in all_issues)
-            if all_issues
-            else "  (general code-quality improvements)"
-        )
 
         # Dump existing artifact → mutable dict, preserving all non-file fields
         data: Dict = json.loads(existing_artifact.model_dump_json())
@@ -299,12 +321,20 @@ class BaseAgent:
                 existing_content = content_map.get(path, "")
                 console.print(f"[dim]  ✍  Patching: {path}[/dim]")
 
+                # Filter issues to those relevant to THIS specific file
+                file_issues = _issues_for_file(all_issues, path)
+                issues_str = (
+                    "\n".join(f"  - {iss}" for iss in file_issues)
+                    if file_issues
+                    else "  (no specific issues for this file)"
+                )
+
                 if existing_content:
                     fill_msg = (
                         f"Fix specific code-review issues in this existing file.\n\n"
                         f"File: {path}\n"
                         f"Purpose: {purpose}\n\n"
-                        f"## Issues to fix (from code review — address ALL of them):\n{issues_str}\n\n"
+                        f"## Issues to fix (only those relevant to THIS file):\n{issues_str}\n\n"
                         f"## Existing file content (apply fixes, keep everything else intact):\n"
                         f"```\n{existing_content[:6000]}\n```\n\n"
                         "Output the COMPLETE corrected file. Do NOT truncate. No TODOs.\n"
