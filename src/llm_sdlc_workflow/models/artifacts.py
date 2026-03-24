@@ -470,6 +470,19 @@ class ReviewArtifact(ReviewFeedback):
     recommendations: List[str] = []
     decisions: List[DecisionRecord] = []
 
+    @field_validator(
+        "strengths", "critical_fixes_required", "recommendations",
+        mode="before",
+    )
+    @classmethod
+    def _coerce(cls, v: Any) -> List[str]:
+        return _coerce_str_list(v)
+
+    @field_validator("critical_issues", "high_issues", "suggestions", mode="before")
+    @classmethod
+    def _coerce_feedback(cls, v: Any) -> List[str]:
+        return _coerce_str_list(v)
+
 
 # ─── Testing Agent ───────────────────────────────────────────────────────────
 
@@ -521,6 +534,15 @@ class TestingArtifact(BaseModel):
     failed_services: List[str] = []  # service names with failures (infrastructure stage)
     recommendations: List[str]
     decisions: List[DecisionRecord] = []
+
+    @field_validator(
+        "coverage_areas", "uncovered_areas", "findings",
+        "blocking_issues", "failed_services", "recommendations",
+        mode="before",
+    )
+    @classmethod
+    def _coerce(cls, v: Any) -> List[str]:
+        return _coerce_str_list(v)
 
 
 # ─── Spec Agent (forward contract for spec-driven development) ───────────────

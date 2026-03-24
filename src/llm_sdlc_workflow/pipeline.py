@@ -369,6 +369,7 @@ class Pipeline:
                 result.intent = await self.discovery_agent.run(requirements)
                 self._step_done("Discovery", len(result.intent.requirements), "requirements extracted")
                 self._print_decisions("Discovery", result.intent.decisions)
+                self._write_decision_log(result)
                 await self._await_human(
                     checkpoint="Checkpoint 1 — Requirements Validated",
                     details=[
@@ -417,6 +418,7 @@ class Pipeline:
                     "Architecture", len(result.architecture.components), "components designed"
                 )
                 self._print_decisions("Architecture", result.architecture.design_decisions)
+                self._write_decision_log(result)
 
                 self._step_header(
                     f"Testing [Stage 1, iter {_arch_iter}]", "Testing Agent",
@@ -508,6 +510,7 @@ class Pipeline:
                     f"spec files — services: [{services}]  ports: {ports}"
                 )
                 self._print_decisions("Spec", result.generated_spec.decisions)
+                self._write_decision_log(result)
 
                 _spec_dir = os.path.join(self.artifacts_dir, self.project_name, "specs")
                 _openapi_lines = len((result.generated_spec.openapi_spec or "").splitlines())
@@ -551,11 +554,13 @@ class Pipeline:
                 )
                 self._step_done("Engineering", len(result.engineering.generated_files), "files generated")
                 self._print_decisions("Engineering", result.engineering.decisions)
+                self._write_decision_log(result)
                 self._step_done(
                     "Infrastructure (plan)", len(result.infra_plan.iac_files),
                     "IaC files written (containers start after review loop)"
                 )
                 self._print_decisions("Infrastructure", result.infra_plan.decisions)
+                self._write_decision_log(result)
 
             # ── Step 6: Review loop ─────────────────────────────────────────
             previous_feedback = None
