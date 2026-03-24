@@ -129,7 +129,8 @@ class ReviewAgent(BaseAgent):
                 + "\n".join(f"- {i}" for i in previous_feedback.high_issues)
             )
 
-        user_message = f"""Review iteration {iteration}.
+        # Single comprehensive context — sent in one call
+        review_context = f"""Review iteration {iteration}.
 
 ## Discovery Summary
 {self._compact(intent)}
@@ -142,18 +143,24 @@ class ReviewAgent(BaseAgent):
 
 ## Infrastructure Artifact (IaC files)
 {self._infra_review_context(infrastructure)}
-{prev_section}
+{prev_section}"""
 
-Review both the source code AND the IaC files.
-Set passed=true ONLY if critical_issues is empty.
-Respond ONLY with the JSON block."""
-
-        artifact = await self._query_and_parse(
-            system=SYSTEM_PROMPT,
-            user_message=user_message,
-            model_class=ReviewArtifact,
+        message = (
+            review_context
+            + "\n\nReview ALL dimensions: security, reliability, maintainability, and performance.\n"
+            "Produce the complete ReviewArtifact including:\n"
+            "  - issues: all Issue objects across every dimension\n"
+            "  - critical_issues, high_issues, suggestions: lists of strings\n"
+            "  - security_score, reliability_score, maintainability_score, performance_score (0-100)\n"
+            "  - overall_score: weighted avg (security×0.35 + reliability×0.25 + "
+            "maintainability×0.25 + performance×0.15)\n"
+            "  - passed: true ONLY if critical_issues is empty\n"
+            "  - strengths, recommendations, decisions, critical_fixes_required\n"
+            "Respond ONLY with the JSON block."
         )
-        # Ensure the iteration counter matches
+
+        artifact = await self._query_and_parse(SYSTEM_PROMPT, message, ReviewArtifact)
+
         artifact.iteration = iteration
 
         filename = f"04_review_artifact_iter{iteration}.json"

@@ -28,6 +28,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Type, TypeVar
 
@@ -43,6 +44,59 @@ _PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "..", "prompts")
 # GitHub Models free tier: UserConcurrentRequests = 2 per 0 s.
 # Lazily initialised so it's always created inside the running event loop.
 _LLM_SEMAPHORE: Optional[asyncio.Semaphore] = None
+
+# Guard to prevent nested spinners when _raw_query is called from inside
+# a chunked loop that is already displaying a status line.
+_SPINNER_ACTIVE: bool = False
+
+# ─── Friendly model name display ─────────────────────────────────────────────
+_MODEL_DISPLAY_NAMES: Dict[str, str] = {
+    # Anthropic Claude
+    "claude-haiku-4-5-20251001":   "Claude Haiku 4.5",
+    "claude-haiku-3-5-20241022":   "Claude Haiku 3.5",
+    "claude-sonnet-4-5-20251001":  "Claude Sonnet 4.5",
+    "claude-sonnet-3-7-20250219":  "Claude Sonnet 3.7",
+    "claude-opus-4-5-20251001":    "Claude Opus 4.5",
+    # OpenAI
+    "gpt-4o":                      "GPT-4o",
+    "gpt-4o-mini":                 "GPT-4o mini",
+    "gpt-4.1":                     "GPT-4.1",
+    "gpt-4.1-mini":                "GPT-4.1 mini",
+    "o1":                          "o1",
+    "o3-mini":                     "o3 mini",
+    # Google
+    "gemini-2.0-flash":            "Gemini 2.0 Flash",
+    "gemini-2.0-flash-lite":       "Gemini 2.0 Flash Lite",
+    "gemini-1.5-pro":              "Gemini 1.5 Pro",
+    # xAI
+    "grok-2":                      "Grok 2",
+    "grok-2-mini":                 "Grok 2 mini",
+    # Mistral
+    "mistral-large-latest":        "Mistral Large",
+    "mistral-small-latest":        "Mistral Small",
+    "codestral-latest":            "Codestral",
+}
+
+
+def _friendly_model_name(model: str) -> str:
+    """Return a human-readable display name for a model ID.
+
+    Falls back to a best-effort transformation for unknown IDs:
+      claude-haiku-4-5-20251001 → Claude Haiku 4.5
+      gpt-4o-mini              → GPT-4o mini  (passthrough, already readable)
+    """
+    if model in _MODEL_DISPLAY_NAMES:
+        return _MODEL_DISPLAY_NAMES[model]
+    # Auto-format Claude model IDs that aren't in the table
+    m = model.lower()
+    if m.startswith("claude-"):
+        parts = m.split("-")  # e.g. ["claude","haiku","4","5","20251001"]
+        if len(parts) >= 3:
+            family = parts[1].capitalize()
+            version_parts = [p for p in parts[2:] if not (p.isdigit() and len(p) == 8)]
+            version = ".".join(version_parts)
+            return f"Claude {family} {version}".strip()
+    return model  # passthrough for already-readable names like gpt-4o-mini
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -175,6 +229,63 @@ class BaseAgent:
         except Exception as e:
             console.print(f"[red]JSON parse error in {self.name}:[/red] {e}")
             console.print(f"[dim]Raw (first 1000 chars):\n{raw[:1000]}[/dim]")
+            raise
+
+    async def _two_phase_parse(
+        self,
+        system: str,
+        phase1_message: str,
+        phase2_message: str,
+        model_class: Type[T],
+        *,
+        merge_key: str = "decisions",
+        phase1_label: str = "phase 1",
+        phase2_label: str = "phase 2",
+    ) -> T:
+        """Two-phase structured query.
+
+        Phase 1 produces the main artifact body with ``merge_key`` set to [].
+        Phase 2 asks only for the ``merge_key`` field (e.g. decisions / issues).
+        The two responses are merged before Pydantic validation.
+
+        Benefits:
+        - Each LLM call is ~30-50 % smaller → faster token generation.
+        - Progress is visible between phases instead of one long silence.
+        - Phase 2 failure is non-fatal (merge_key falls back to []).
+        """
+        # ── Phase 1 ──────────────────────────────────────────────────────────
+        console.print(Rule(f"[bold cyan]{self.name} — {phase1_label}[/bold cyan]"))
+        self._add_to_history("user", phase1_message)
+        raw1 = await self._run_with_retry(system, phase1_message)
+        self._add_to_history("assistant", raw1 or "")
+        console.print(Rule())
+        if not raw1:
+            raise ValueError(f"{self.name} ({phase1_label}) returned empty response.")
+        data = self._extract_json(raw1)
+        data.setdefault(merge_key, [])
+
+        # ── Phase 2 ──────────────────────────────────────────────────────────
+        console.print(Rule(f"[bold cyan]{self.name} — {phase2_label}[/bold cyan]"))
+        self._add_to_history("user", phase2_message)
+        raw2 = await self._run_with_retry(system, phase2_message)
+        self._add_to_history("assistant", raw2 or "")
+        console.print(Rule())
+        if raw2:
+            try:
+                d2 = self._extract_json(raw2)
+                # Support both {"decisions": [...]} and {"issues": [...]} shapes
+                if merge_key in d2:
+                    data[merge_key] = d2[merge_key]
+                else:
+                    # merge_key may be a top-level list of dicts — or a sub-object
+                    data.update({k: v for k, v in d2.items() if k not in data or not data[k]})
+            except Exception:
+                pass  # phase 2 is non-critical
+
+        try:
+            return model_class(**data)
+        except Exception as e:
+            console.print(f"[red]Two-phase parse error in {self.name}:[/red] {e}")
             raise
 
     async def _query_and_parse_chunked(
@@ -411,6 +522,7 @@ class BaseAgent:
         concurrent LLM calls are ever in flight (N=1 for Anthropic, 2 otherwise).
         Pass max_tokens=8192 for fill-phase calls that only generate one file.
         """
+        global _SPINNER_ACTIVE
         client = _make_client()
         # Anthropic's OpenAI-compat endpoint does not support json_object —
         # only json_schema (or no response_format at all).  All our prompts
@@ -420,16 +532,39 @@ class BaseAgent:
         extra: dict = {} if _is_anthropic else {"response_format": {"type": "json_object"}}
         # Re-read at call time so --model / PIPELINE_MODEL set after import takes effect
         _model = os.getenv("PIPELINE_MODEL", _DEFAULT_MODEL)
+
+        spinner_label = f"[dim cyan]  ⏳  {self.name} — thinking with {_friendly_model_name(_model)}…[/dim cyan]"
+        t0 = time.monotonic()
+
         async with _get_semaphore():
-            response = await client.chat.completions.create(
-                model=_model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user",   "content": user_message},
-                ],
-                max_tokens=max_tokens,
-                **extra,
-            )
+            if not _SPINNER_ACTIVE:
+                _SPINNER_ACTIVE = True
+                try:
+                    with console.status(spinner_label, spinner="dots"):
+                        response = await client.chat.completions.create(
+                            model=_model,
+                            messages=[
+                                {"role": "system", "content": system},
+                                {"role": "user",   "content": user_message},
+                            ],
+                            max_tokens=max_tokens,
+                            **extra,
+                        )
+                finally:
+                    _SPINNER_ACTIVE = False
+            else:
+                response = await client.chat.completions.create(
+                    model=_model,
+                    messages=[
+                        {"role": "system", "content": system},
+                        {"role": "user",   "content": user_message},
+                    ],
+                    max_tokens=max_tokens,
+                    **extra,
+                )
+
+        elapsed = time.monotonic() - t0
+        console.print(f"[dim]  ✓ response in {elapsed:.1f}s[/dim]")
         return response.choices[0].message.content or ""
 
     # ─── Context formatting ──────────────────────────────────────────────────

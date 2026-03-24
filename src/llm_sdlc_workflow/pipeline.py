@@ -28,6 +28,7 @@ import glob
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -999,6 +1000,7 @@ class Pipeline:
             return HumanDecision.CONTINUE
 
     def _step_header(self, step: str, agent: str, description: str) -> None:
+        self._step_start: float = time.monotonic()
         console.print(Panel(
             f"[bold]{agent}[/bold]\n{description}",
             title=f"[cyan]{step}[/cyan]",
@@ -1006,7 +1008,8 @@ class Pipeline:
         ))
 
     def _step_done(self, name: str, count: int, label: str) -> None:
-        console.print(f"[green]✅ {name} complete — {count} {label}[/green]\n")
+        elapsed = time.monotonic() - getattr(self, "_step_start", time.monotonic())
+        console.print(f"[green]\u2705 {name} complete \u2014 {count} {label}[/green]  [dim]({elapsed:.0f}s)[/dim]\n")
 
     def _print_decisions(self, agent_name: str, decisions: list, max_show: int = 2) -> None:
         """Print a compact decision summary to console after each stage."""

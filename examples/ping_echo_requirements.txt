@@ -1,0 +1,17 @@
+Build a single-service Kotlin/Spring Boot REST API for a simple ping/echo service.
+
+Requirements:
+1. GET /ping → returns JSON: { "status": "ok", "timestamp": "<ISO datetime>" }
+2. POST /echo → accepts JSON body { "message": "<string>" } and returns { "echo": "<message>", "length": <int> }
+3. GET /actuator/health → Spring Boot Actuator health endpoint
+
+Technology:
+- Kotlin with Spring Boot 3.3, Gradle Kotlin DSL
+- No database, no authentication, no BFF, no frontend
+- H2 not needed (stateless service)
+
+Non-functional:
+- Single service, backend only
+- Runs on port 8080
+- Dockerised with multi-stage Dockerfile
+- docker compose up starts it with one command

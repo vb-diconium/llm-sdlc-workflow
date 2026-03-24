@@ -89,20 +89,24 @@ class TestingAgent(BaseAgent):
                 ),
             }[stage]
 
-        user_message = f"""Perform {stage.upper()} stage testing.
+        message = f"""Perform {stage.upper()} stage testing.
 
 {stage_instruction}
 
 {context}
 
+Produce the complete TestingArtifact including:
+  - stage, test_cases, http_test_cases (if infrastructure stage), cypress_spec_files (if needed)
+  - coverage_areas, uncovered_areas
+  - blocking_issues: list of requirements NOT satisfied
+  - findings, recommendations
+  - passed: true ONLY if blocking_issues is empty
+  - failed_services: service names with live test failures (infrastructure stage only)
+
 Test cases must be derived from the Discovery's requirements and success criteria.
 Respond ONLY with the JSON object."""
 
-        artifact = await self._query_and_parse(
-            system=SYSTEM_PROMPT,
-            user_message=user_message,
-            model_class=TestingArtifact,
-        )
+        artifact = await self._query_and_parse(SYSTEM_PROMPT, message, TestingArtifact)
 
         # Infrastructure stage: execute live HTTP tests + write/run Cypress specs
         if stage == "infrastructure":

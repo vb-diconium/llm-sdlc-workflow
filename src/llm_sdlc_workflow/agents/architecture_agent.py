@@ -20,18 +20,37 @@ class ArchitectureAgent(BaseAgent):
     async def run(
         self, intent: DiscoveryArtifact, spec: Optional[SpecArtifact] = None
     ) -> ArchitectureArtifact:
-        user_message = f"""Design the system architecture for the following requirements.
+        base_context = f"""\
+Design the system architecture for the following requirements.
 
 ## Intent Summary
 {self._compact(intent)}
 {self._build_spec_section(spec)}
+"""
 
-Respond ONLY with the JSON block."""
+        phase1_message = (
+            base_context
+            + "Set \"design_decisions\" to an empty array []. "
+            "You will fill decisions in a follow-up step.\n"
+            "Respond ONLY with the JSON block."
+        )
 
-        artifact = await self._query_and_parse(
+        phase2_message = (
+            "Based on the architecture you just designed, produce the \"design_decisions\" list.\n"
+            "For each key choice (framework, pattern, data store, security model, etc.) record:\n"
+            "  - decision, rationale, alternatives_considered, trade_offs\n"
+            "Limit to the 8 most important decisions.\n"
+            'Respond ONLY with JSON: {"design_decisions": [ ... ]}'
+        )
+
+        artifact = await self._two_phase_parse(
             system=SYSTEM_PROMPT,
-            user_message=user_message,
+            phase1_message=phase1_message,
+            phase2_message=phase2_message,
             model_class=ArchitectureArtifact,
+            merge_key="design_decisions",
+            phase1_label="phase 1: structure",
+            phase2_label="phase 2: decisions",
         )
 
         self.save_artifact(artifact, "02_architecture_artifact.json")
@@ -78,7 +97,8 @@ Respond ONLY with the JSON block."""
         findings = "\n".join(f"  - {f}" for f in test_result.findings) or "  (none listed)"
         uncovered = "\n".join(f"  - {u}" for u in test_result.uncovered_areas) or "  (none listed)"
 
-        user_message = f"""Revise the system architecture to fix ALL blocking issues found by the Stage 1 testing agent.
+        phase1_message = f"""\
+Revise the system architecture to fix ALL blocking issues found by the Stage 1 testing agent.
 
 ## Original Intent
 {self._compact(intent)}
@@ -98,12 +118,24 @@ Respond ONLY with the JSON block."""
 
 Redesign the architecture so that every blocking issue above is eliminated.
 Do NOT remove or ignore any requirement — add, split or restructure components as needed.
+Set "design_decisions" to [] — decisions will follow in the next step.
 Respond ONLY with the JSON block."""
 
-        artifact = await self._query_and_parse(
+        phase2_message = (
+            "Based on the revised architecture you just produced, list the key \"design_decisions\".\n"
+            "Focus on decisions that directly address the blocking issues above.\n"
+            "Limit to 6 most important. "
+            'Respond ONLY with JSON: {"design_decisions": [ ... ]}'
+        )
+
+        artifact = await self._two_phase_parse(
             system=SYSTEM_PROMPT,
-            user_message=user_message,
+            phase1_message=phase1_message,
+            phase2_message=phase2_message,
             model_class=ArchitectureArtifact,
+            merge_key="design_decisions",
+            phase1_label="phase 1: revised structure",
+            phase2_label="phase 2: decisions",
         )
 
         self.save_artifact(artifact, "02_architecture_artifact.json")
