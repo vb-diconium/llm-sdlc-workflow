@@ -1204,28 +1204,31 @@ The JSON schema at the bottom of each prompt file defines the artifact structure
 
 ## How It Works
 
-1. **Chunked LLM generation** — each agent generates files in two LLM calls: first a plan with all content `__PENDING__`, then one call per file to fill it. Prevents token-limit failures on large codebases.
+1. **Single HTTP client for all providers** — all LLM calls go through the **OpenAI Python SDK** (`AsyncOpenAI`), used as a generic HTTP client. Every supported provider (GitHub Models, Anthropic, xAI, Google Gemini, Mistral, Ollama) exposes an OpenAI-compatible REST endpoint, so swapping providers is purely a matter of changing `PIPELINE_BASE_URL` and `PIPELINE_API_KEY` — no code changes, no extra packages.
+
+2. **Chunked LLM generation** — each agent generates files in two LLM calls: first a plan with all content `__PENDING__`, then one call per file to fill it. Prevents token-limit failures on large codebases.
 
 2. **Contract-first spec** — the Spec Agent generates an OpenAPI + DDL contract *before* any code is written. All three engineering sub-agents implement against this single source of truth, ensuring consistency from day one.
 
-3. **Parallel sub-agents** — Only the *enabled* sub-agents run, via `asyncio.gather`. Disable BFF or Frontend with a flag; add Mobile with `--mobile`. Infrastructure planning also runs in parallel with Engineering. After the review loop, the **Infrastructure Agent** (start containers) and **Deployment Agent** (CI/CD + K8s + Helm) both run in parallel.
+4. **Parallel sub-agents** — Only the *enabled* sub-agents run, via `asyncio.gather`. Disable BFF or Frontend with a flag; add Mobile with `--mobile`. Infrastructure planning also runs in parallel with Engineering. After the review loop, the **Infrastructure Agent** (start containers) and **Deployment Agent** (CI/CD + K8s + Helm) both run in parallel.
 
-4. **Review feedback loop** — the Review Agent runs up to 3 times. If critical issues are found, Engineering and Infrastructure both re-generate in parallel with the feedback applied. Review scores are **deterministic**: start at 100 and deduct fixed points per issue severity, weighted across security/reliability/maintainability/performance dimensions.
+5. **Review feedback loop** — the Review Agent runs up to 3 times. If critical issues are found, Engineering and Infrastructure both re-generate in parallel with the feedback applied. Review scores are **deterministic**: start at 100 and deduct fixed points per issue severity, weighted across security/reliability/maintainability/performance dimensions.
 
-5. **Compact context** — each agent receives a compact summary of upstream artifacts, not raw JSON blobs. Keeps prompts lean and LLM calls fast.
+6. **Compact context** — each agent receives a compact summary of upstream artifacts, not raw JSON blobs. Keeps prompts lean and LLM calls fast.
 
-6. **Incremental contracts** — `--from-run` marks existing API paths `x-existing: true` so new runs only add endpoints, never silently break a live API.
+7. **Incremental contracts** — `--from-run` marks existing API paths `x-existing: true` so new runs only add endpoints, never silently break a live API.
 
-7. **Full decision traceability** — every agent records `DecisionRecord` entries (what was decided, why, alternatives rejected). A `DECISIONS_LOG.md` is written to the run directory after every run — a human-readable audit trail of all agent decisions across all pipeline stages.
+8. **Full decision traceability** — every agent records `DecisionRecord` entries (what was decided, why, alternatives rejected). A `DECISIONS_LOG.md` is written to the run directory after every run — a human-readable audit trail of all agent decisions across all pipeline stages.
 
-8. **Topology contract** — the pipeline computes a `TopologyContract` before any agent runs. It assigns canonical ports to every service (backend-only → 8080; full-stack → backend:8081, BFF:8080, frontend:3000) and injects this contract into every agent that generates ports, Dockerfiles, or docker-compose. Prevents port-mismatch bugs where one agent picks 8080 and another picks 8081.
+9. **Topology contract** — the pipeline computes a `TopologyContract` before any agent runs. It assigns canonical ports to every service (backend-only → 8080; full-stack → backend:8081, BFF:8080, frontend:3000) and injects this contract into every agent that generates ports, Dockerfiles, or docker-compose. Prevents port-mismatch bugs where one agent picks 8080 and another picks 8081.
 
 ---
 
 ## Requirements
 
 - Python 3.11+
-- GitHub CLI (`gh`) authenticated with a GitHub Copilot licence
+- **`openai` Python package** (`pip install -e .` installs it) — used as the HTTP client for every LLM provider; no `anthropic` or provider-specific SDK needed
+- GitHub CLI (`gh`) authenticated with a GitHub Copilot licence — only required when using the default GitHub Models endpoint
 - Docker (Docker Desktop or Docker Engine) — for the Infrastructure Agent to build and start containers
 - Node.js 18+ + `npx` — optional, only needed for running Cypress e2e tests locally
 - Python packages: managed via `pyproject.toml` — install with `pip install -e .`
