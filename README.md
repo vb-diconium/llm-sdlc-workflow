@@ -1,25 +1,47 @@
 # LLM SDLC Workflow
 
-> Turn raw requirements into a running full-stack monorepo application — automatically.
-> Spec-driven, contract-first, and designed to extend incrementally across your entire SDLC.
+**From requirements file to running full-stack application — automated end to end.**
 
-A fully automated software development pipeline where specialised AI agents collaborate across every phase: from requirements discovery through system architecture, contract-first spec generation, parallel code generation, infrastructure-as-code, automated live HTTP testing, and iterative code review with a feedback loop.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Providers](https://img.shields.io/badge/providers-7-green.svg)](#provider-quick-reference)
 
-The pipeline is **fully configurable**: choose which services to generate (backend, BFF, frontend, mobile), override the language and framework for each service, and tune everything from a single `pipeline.yaml` or via CLI flags — no Python changes required.
+---
 
-Supports multiple LLM providers (Anthropic, GitHub Copilot, and others). Provide credentials and model selection
-via environment variables: `PIPELINE_BASE_URL`, `PIPELINE_API_KEY`, and `PIPELINE_MODEL`.
+## Overview
 
-Example (Anthropic):
+Writing software takes time not because code is hard to write, but because the decisions behind it are hard to make consistently. Requirements get misinterpreted. Architecture drifts between services. API contracts break between teams. Security issues surface after the code is already written.
 
-```bash
-PIPELINE_BASE_URL="https://api.anthropic.com/v1" \
-PIPELINE_API_KEY="$ANTHROPIC_API_KEY" \
-PIPELINE_MODEL="claude-haiku-4-5-20251001" \
-python3.11 main.py --requirements reqs.txt --project-name my_project --auto
-```
+LLM SDLC Workflow addresses each of these failure points with a pipeline of specialised AI agents, each responsible for one phase of the software delivery lifecycle. Agents do not share a context window or pass raw JSON between each other. Each one receives a compact, typed artifact from the previous stage, produces a typed artifact of its own, and hands off to the next. The result is a timestamped directory containing generated source code, OpenAPI contracts, Dockerfiles, docker-compose, Kubernetes manifests, and a complete audit log of every decision made.
 
-The pipeline will use the configured model endpoint for all agent calls.
+The pipeline is **contract-first**. The Spec Agent generates an OpenAPI 3.0 + SQL DDL contract before any code is written. All engineering agents implement against this contract. Subsequent runs can extend it without breaking existing endpoints.
+
+The pipeline is **measurable**. The Review Agent scores output deterministically: start at 100, deduct fixed points per issue severity, weighted across security, reliability, maintainability, and performance. Results are reproducible and comparable across iterations.
+
+The pipeline is **configurable**. Choose which services to generate, override the language and framework per service, and tune everything from a single `pipeline.yaml` — no Python changes required.
+
+**Supported providers:** GitHub Models (default) · Anthropic · OpenAI · xAI · Google Gemini · Mistral · Ollama
+
+---
+
+## Table of Contents
+
+- [Pipeline Flow](#pipeline-flow)
+- [Agents](#agents)
+- [SDLC Coverage](#sdlc-coverage)
+- [Deterministic Review Scoring](#deterministic-review-scoring)
+- [Configuring the Pipeline](#configuring-the-pipeline)
+- [Human Intelligence Checkpoints](#human-intelligence-checkpoints)
+- [Resilience and Reliability](#resilience--reliability)
+- [Multi-Project Support](#multi-project-support)
+- [Installation](#installation)
+- [Usage](#usage)
+- [Output Structure](#output-structure)
+- [Project Structure](#project-structure)
+- [Customising Prompts](#customising-prompts)
+- [Roadmap](#roadmap--planned-agents)
+- [How It Works](#how-it-works)
+- [Requirements](#requirements)
 
 ---
 
@@ -124,7 +146,7 @@ The pipeline will use the configured model endpoint for all agent calls.
   ║                                                                 ║
   ║   ┌─────────────────────────────────────────────────────────┐  ║
   ║   │                   Testing Agent                          │  ║
-  ║   │     Live HTTP tests via httpx (curl-equivalent)             │  ║
+  ║   │     Live HTTP tests via httpx (curl-equivalent)         │  ║
   ║   │           → 05b_testing_infrastructure.json             │  ║
   ║   └────────────────────────┬────────────────────────────────┘  ║
   ║                            │                                    ║
@@ -157,18 +179,18 @@ The pipeline will use the configured model endpoint for all agent calls.
 
 | Agent | Role | Output |
 |---|---|---|
-| **Discovery Agent** | Extracts requirements, goals, constraints, scope, risks, and success criteria from raw text. Uses two-phase LLM calls: phase 1 = facts & scope; phase 2 = interpretation decisions | `DiscoveryArtifact` |
-| **Architecture Agent** | Designs the system: components, data flow, API contracts, security model. Uses two-phase LLM calls: phase 1 = structure; phase 2 = design decisions | `ArchitectureArtifact` |
-| **Spec Agent** | Generates the **forward contract** (OpenAPI 3.0 + SQL DDL) that all engineering implements against | `GeneratedSpecArtifact` |
+| **Discovery Agent** | Extracts requirements, goals, constraints, scope, risks, and success criteria from raw text. Two-phase: phase 1 = facts and scope; phase 2 = interpretation decisions | `DiscoveryArtifact` |
+| **Architecture Agent** | Designs the system: components, data flow, API contracts, security model. Two-phase: phase 1 = structure; phase 2 = design decisions | `ArchitectureArtifact` |
+| **Spec Agent** | Generates the forward contract (OpenAPI 3.0 + SQL DDL) that all engineering implements against | `GeneratedSpecArtifact` |
 | **Engineering Agent** | Orchestrates BE + BFF + FE sub-agents in parallel via `asyncio.gather` | `EngineeringArtifact` |
 | ↳ **Backend Agent** | Tech-agnostic backend (configurable language/framework) — files under `backend/` | `ServiceArtifact` |
-| ↳ **BFF Agent** | Tech-agnostic BFF layer (configurable language/framework), calls backend — files under `bff/`. **Opt-in** (`components.bff: true`) | `ServiceArtifact` |
-| ↳ **Frontend Agent** | Tech-agnostic frontend (configurable framework/language) — files under `frontend/`. **Opt-in** (`components.frontend: true`) | `ServiceArtifact` |
+| ↳ **BFF Agent** | Tech-agnostic BFF layer (configurable language/framework) — files under `bff/`. Opt-in: `components.bff: true` | `ServiceArtifact` |
+| ↳ **Frontend Agent** | Tech-agnostic frontend (configurable framework/language) — files under `frontend/`. Opt-in: `components.frontend: true` | `ServiceArtifact` |
 | ↳ **Mobile Agent** | Tech-agnostic mobile apps (configurable platforms) — files under `mobile/`. Opt-in via `--mobile` or `components.mobile: true` | `ServiceArtifact` |
-| **Infrastructure Agent** | Dockerfiles + docker-compose for the full stack; tech-stack-aware (respects configured language/framework) | `InfrastructureArtifact` |
+| **Infrastructure Agent** | Dockerfiles + docker-compose for the full stack; tech-stack-aware | `InfrastructureArtifact` |
 | **Deployment Agent** | GitHub Actions CI/CD workflows, Kubernetes manifests, Helm chart, blue-green + canary strategies, rollback scripts | `DeploymentArtifact` |
-| **Review Agent** | Security (OWASP), reliability, code quality — feedback loop until no critical/high issues. Score computed by deterministic rubric: start 100, deduct 15/8/3/1 per critical/high/medium/low per dimension, weighted avg (security×0.35, reliability×0.25, maintainability×0.25, performance×0.15). Pass only when no criticals and overall >= 70 | `ReviewArtifact` |
-| **Testing Agent** | 3-stage: architecture plan → live HTTP via httpx (curl-equivalent) → final sign-off. No Cypress/browser tests — all checks use plain HTTP request/response | `TestingArtifact` |
+| **Review Agent** | Security (OWASP), reliability, code quality — feedback loop until no critical or high issues. Score: start 100, deduct 15/8/3/1 per critical/high/medium/low per dimension, weighted average (security×0.35, reliability×0.25, maintainability×0.25, performance×0.15). Pass: no criticals AND overall >= 70 | `ReviewArtifact` |
+| **Testing Agent** | 3-stage: architecture plan → live HTTP via httpx → final sign-off. All checks use plain HTTP request/response | `TestingArtifact` |
 
 ---
 
@@ -178,84 +200,71 @@ The pipeline will use the configured model endpoint for all agent calls.
 |---|---|---|
 | Requirements Discovery | Discovery Agent | ✅ Active |
 | System Architecture | Architecture Agent | ✅ Active |
-| API Contract & Database Design | Spec Agent | ✅ Active |
+| API Contract and Database Design | Spec Agent | ✅ Active |
 | Backend Development | Backend Agent | ✅ Active |
 | BFF Development | BFF Agent | ✅ Active |
 | Frontend Development | Frontend Agent | ✅ Active |
 | Mobile Development (React Native, Flutter, Swift, Kotlin) | Mobile Agent | ✅ Active (opt-in) |
 | Infrastructure / IaC | Infrastructure Agent | ✅ Active |
-| Code Review & Security Audit | Review Agent | ✅ Active |
+| Code Review and Security Audit | Review Agent | ✅ Active |
 | Testing (plan + live HTTP) | Testing Agent | ✅ Active |
+| CI/CD Pipelines (GitHub Actions, K8s, Helm, canary + blue-green) | Deployment Agent | ✅ Active |
 | API Documentation (Swagger UI, ADRs, runbooks) | Documentation Agent | 🔜 Planned |
 | Observability (Prometheus, OpenTelemetry, Grafana) | Observability Agent | 🔜 Planned |
-| CI/CD Pipelines (GitHub Actions, K8s, Helm, canary + blue-green) | Deployment Agent | ✅ Active |
 | Database Migrations (Flyway / Liquibase) | Migration Agent | 🔜 Planned |
-| Performance & Load Testing (k6 / Gatling) | Performance Agent | 🔜 Planned |
+| Performance and Load Testing (k6 / Gatling) | Performance Agent | 🔜 Planned |
 | Compliance Checks (GDPR, SOC2, HIPAA) | Compliance Agent | 🔜 Planned |
-| Dependency & Vulnerability Scanning (SAST, CVE) | Security Scan Agent | 🔜 Planned |
-| Technical Debt & Refactoring | Maintenance Agent | 🔜 Planned |
+| Dependency and Vulnerability Scanning (SAST, CVE) | Security Scan Agent | 🔜 Planned |
+| Technical Debt and Refactoring | Maintenance Agent | 🔜 Planned |
 
 ---
 
 ## Deterministic Review Scoring
 
-- Per-dimension score: start at 100 and deduct per-issue penalties: critical (-15), high (-8), medium (-3), low (-1).
-- Overall score: weighted average across dimensions: **security × 0.35**, **reliability × 0.25**, **maintainability × 0.25**, **performance × 0.15**.
-- Pass criteria: **no critical issues** AND **overall_score >= 70**.
+- **Per-dimension score:** start at 100 and deduct per-issue penalties: critical (-15), high (-8), medium (-3), low (-1).
+- **Overall score:** weighted average across dimensions: security × 0.35, reliability × 0.25, maintainability × 0.25, performance × 0.15.
+- **Pass criteria:** no critical issues AND overall_score >= 70.
 
 This deterministic formula replaces free-form model scoring so results are reproducible and comparable across iterations. See `src/llm_sdlc_workflow/prompts/review_agent.md` for the exact prompt text used by the Review Agent.
 
+---
 
 ## Configuring the Pipeline
 
-By default the pipeline generates a **tech-agnostic backend only** (BFF and frontend are **disabled**). Add BFF and/or frontend explicitly with `--bff` / `--frontend` flags or `components.bff: true` in `pipeline.yaml`. Everything is overridable — with CLI flags, `pipeline.yaml`, or environment variables — and no Python code changes are ever required.
+By default the pipeline generates a tech-agnostic backend only (BFF and frontend are disabled). Add BFF and/or frontend with `--bff` / `--frontend` flags or `components.bff: true` in `pipeline.yaml`. Everything is overridable via CLI flags, `pipeline.yaml`, or environment variables — no Python code changes required.
 
-> **Tip:** `pipeline.yaml` is auto-loaded from the current working directory when present — no `--config` flag needed.
+> `pipeline.yaml` is auto-loaded from the current working directory when present — no `--config` flag needed.
 
 ### Component Toggles
 
-Control which service sub-agents run:
-
 | Flag | pipeline.yaml | Effect |
 |---|---|---|
-| _(default)_ | `components.bff: false` | BFF sub-agent **disabled** |
+| _(default)_ | `components.bff: false` | BFF sub-agent disabled |
 | `--bff` | `components.bff: true` | BFF enabled |
-| _(default)_ | `components.frontend: false` | Frontend sub-agent **disabled** |
+| _(default)_ | `components.frontend: false` | Frontend sub-agent disabled |
 | `--no-frontend` | `components.frontend: false` | Frontend disabled (explicit) |
 | `--mobile` | `components.mobile_platforms: ["React Native"]` | Single React Native mobile app |
 | `--mobile-platform P` | `components.mobile_platforms: [P]` | Single platform of your choice |
-| `--mobile-platform P1 --mobile-platform P2` | `components.mobile_platforms: [P1, P2]` | **Multiple platforms in parallel** |
+| `--mobile-platform P1 --mobile-platform P2` | `components.mobile_platforms: [P1, P2]` | Multiple platforms in parallel |
 
 ### Tech-Stack Preferences
 
-Override the language and/or framework for any service:
-
 | Flag | pipeline.yaml key | Default |
 |---|---|---|
-| `--backend-lang LANG` | `tech.backend_language` | Configurable (no default) |
-| `--backend-framework FW` | `tech.backend_framework` | Configurable (no default) |
-| `--bff-lang LANG` | `tech.bff_language` | Configurable (no default) |
+| `--backend-lang LANG` | `tech.backend_language` | Configurable |
+| `--backend-framework FW` | `tech.backend_framework` | Configurable |
+| `--bff-lang LANG` | `tech.bff_language` | Configurable |
 | `--bff-framework FW` | `tech.bff_framework` | Spring WebFlux |
-| `--frontend-framework FW` | `tech.frontend_framework` | Configurable (no default) |
+| `--frontend-framework FW` | `tech.frontend_framework` | Configurable |
 | `--frontend-lang LANG` | `tech.frontend_language` | TypeScript |
-| `--mobile-platform PLAT` | `components.mobile_platforms: [PLAT]` | Configurable (no default when `--mobile` is set) |
+| `--mobile-platform PLAT` | `components.mobile_platforms: [PLAT]` | Configurable |
 
 ### Common Configurations
 
 #### Pure API project (default)
 
-No flags needed — this is the default:
-
 ```bash
 python3.11 main.py --requirements reqs.txt
-```
-
-or explicitly in `pipeline.yaml` (already the default):
-
-```yaml
-components:
-  bff: false
-  frontend: false
 ```
 
 #### Full-stack project (backend + BFF + frontend)
@@ -277,33 +286,21 @@ python3.11 main.py \
   --frontend-framework Vue
 ```
 
-#### Full stack + React Native mobile app
+#### Full stack + React Native mobile
 
 ```bash
 python3.11 main.py \
   --requirements reqs.txt \
   --mobile
-# Generates mobile_react_native/ — React Native app (configurable SDK version)
-# connecting to BFF via BFF_BASE_URL env var
 ```
 
-#### Full stack + Flutter mobile
-
-```bash
-python3.11 main.py \
-  --requirements reqs.txt \
-  --mobile-platform Flutter
-```
-
-#### iOS **and** Android native — generated in parallel
+#### iOS and Android native — generated in parallel
 
 ```bash
 python3.11 main.py \
   --requirements reqs.txt \
   --mobile-platform "iOS (Swift)" \
   --mobile-platform "Android (Kotlin)"
-# Runs two MobileAgents in parallel via asyncio.gather
-# Outputs: mobile_ios_swift/ and mobile_android_kotlin/
 ```
 
 #### All three mobile targets at once
@@ -316,119 +313,63 @@ python3.11 main.py \
   --mobile-platform "Android (Kotlin)"
 ```
 
-#### Node.js/NestJS BFF, no mobile
-
-```bash
-python3.11 main.py \
-  --requirements reqs.txt \
-  --bff-lang Node.js \
-  --bff-framework NestJS
-```
-
-### Tech-agnostic generation & quick E2E demo
-
-- Agents are tech-agnostic by default: leave tech entries in `pipeline.yaml` as `null` and the Discovery/Spec agents will select appropriate languages/frameworks from the requirements text.
-- For simple verification, run the included `examples/hello_api_requirements.txt` (a minimal single-endpoint service). The pipeline completed a full E2E run during testing and produced generated code and IaC under `artifacts/hello_world_run_<timestamp>/hello_world/` (OpenAPI, Dockerfile, docker-compose, backend/hello_world).
-- Use the Anthropic example environment variables (above) to run the pipeline against Anthropic models if you want to reproduce the exact run.
-
-
 ### pipeline.yaml — Full Configuration Reference
-
-All configuration options live in one file. CLI flags always override `pipeline.yaml` values.
 
 ```yaml
 # pipeline.yaml
 
 # ─── Component Toggles ───────────────────────────────────────────────────────
 components:
-  backend: true      # Set false to... why would you?
-  bff: false         # Set true for BFF tier (API-only projects leave this false)
-  frontend: false    # Set true for web frontend (API-only projects leave this false)
-
-  # mobile_platforms: list of platforms to generate in parallel.
-  # Empty (or omit) = mobile disabled.
-  # Each entry spawns one MobileAgent; all run concurrently via asyncio.gather.
-  # Outputs land in: generated/mobile_react_native/, generated/mobile_ios_swift/, etc.
+  backend: true
+  bff: false
+  frontend: false
   mobile_platforms: []
   # mobile_platforms: ["React Native"]
   # mobile_platforms: ["iOS (Swift)", "Android (Kotlin)"]
-  # mobile_platforms: ["Flutter"]
-  # mobile_platforms: ["React Native", "iOS (Swift)", "Android (Kotlin)"]
 
 # ─── Tech-Stack Preferences ──────────────────────────────────────────────────
-# Leave null for tech-agnostic behavior (agents choose based on requirements).
 tech:
-  # Backend (configurable, no default)
   backend_language: null     # "Kotlin" | "Go" | "Node.js" | "Java" | "Python" | ...
   backend_framework: null    # "Spring Boot" | "Gin" | "Express" | "FastAPI" | ...
-
-  # BFF (configurable, no default)
-  bff_language: null         # "Node.js" | "Kotlin" | "Python" | ...
-  bff_framework: null        # "NestJS" | "Spring WebFlux" | "FastAPI" | ...
-
-  # Frontend (configurable, no default)
+  bff_language: null
+  bff_framework: null
   frontend_framework: null   # "Vue" | "Angular" | "Next.js" | "Svelte" | "React" | ...
   frontend_language: null    # "TypeScript" | "JavaScript"
 
-  # Note: mobile platform(s) are set via components.mobile_platforms above.
-
 # ─── Pipeline Behaviour ──────────────────────────────────────────────────────
 pipeline:
-  # Maximum number of review → patch cycles before halting (default: 3).
-  # Increase for more thorough hardening; decrease for faster iteration.
   max_review_iterations: 3
-
-  # LLM model to use for all agents. Overrides PIPELINE_MODEL env var.
   # model: claude-haiku-4-5-20251001
 
 # ─── Spec-Driven Constraints ─────────────────────────────────────────────────
 spec:
   tech_constraints: null     # e.g. "PostgreSQL 16, Redis 7, JWT auth"
   arch_constraints: null     # e.g. "12-factor app, stateless, horizontal scaling"
-  files: []                  # optional: existing OpenAPI YAML / SQL DDL to honour
+  files: []
 ```
 
 ### Mobile Agent
 
-The Mobile Agent generates a complete mobile client that connects to the BFF (or directly to the backend when BFF is disabled). **Multiple platforms can be generated simultaneously** — each one runs as an independent `MobileAgent` instance via `asyncio.gather`, writing to its own subdirectory.
+Multiple platforms run simultaneously as independent `MobileAgent` instances via `asyncio.gather`.
 
-| Platform | Slug (output dir) | Default stack |
+| Platform | Output directory | Default stack |
 |---|---|---|
-| **React Native** _(default)_ | `mobile_react_native/` | Expo SDK 51, React Navigation 6, Zustand, Axios |
-| **Flutter** | `mobile_flutter/` | Riverpod 2, Dio, GoRouter, Flutter 3.22 |
-| **iOS (Swift)** | `mobile_ios_swift/` | SwiftUI + Combine, URLSession, async/await |
-| **Android (Kotlin)** | `mobile_android_kotlin/` | Jetpack Compose + ViewModel, Retrofit 2, Coroutines |
-
-The BFF URL is injected via the `BFF_BASE_URL` environment variable. Each platform's artifact is saved as `03d_<slug>_artifact.json`.
-
-**Example — iOS + Android in one run:**
-
-```bash
-python3.11 main.py \
-  --requirements reqs.txt \
-  --mobile-platform "iOS (Swift)" \
-  --mobile-platform "Android (Kotlin)"
-# Both agents run concurrently. Outputs:
-#   generated/mobile_ios_swift/
-#   generated/mobile_android_kotlin/
-#   artifacts/03d_mobile_ios_swift_artifact.json
-#   artifacts/03d_mobile_android_kotlin_artifact.json
-```
+| React Native (default) | `mobile_react_native/` | Expo SDK 51, React Navigation 6, Zustand, Axios |
+| Flutter | `mobile_flutter/` | Riverpod 2, Dio, GoRouter, Flutter 3.22 |
+| iOS (Swift) | `mobile_ios_swift/` | SwiftUI + Combine, URLSession, async/await |
+| Android (Kotlin) | `mobile_android_kotlin/` | Jetpack Compose + ViewModel, Retrofit 2, Coroutines |
 
 ---
 
 ## Human Intelligence Checkpoints
 
-The pipeline **automatically pauses** at 4 checkpoints by default. At each pause it prints a summary panel and waits for your input before continuing. No `Ctrl+C` needed.
+The pipeline pauses automatically at four checkpoints. At each pause it prints a summary and waits for input before continuing.
 
 ```
 ⏸  Pipeline paused — human review required
 
   Requirements extracted : 12
   Goals identified       : 5
-  ...
-
-  💡 If requirements were misunderstood, update your file and restart.
 
   Artifact → artifacts/my_run/01_discovery_artifact.json
 
@@ -436,184 +377,81 @@ The pipeline **automatically pauses** at 4 checkpoints by default. At each pause
   ▶ _
 ```
 
-| # | Checkpoint | After Agent | Why Human Input Matters |
+| # | Checkpoint | After Agent | Why It Matters |
 |---|---|---|---|
-| 1 | **Requirements Validated** | Discovery Agent | Confirm the agent correctly interpreted ambiguous requirements; add tacit domain knowledge the LLM can't know |
-| 2 | **Architecture Approved** | Architecture Agent + Test | Review strategic technology choices and trade-offs against team expertise, org constraints, and existing systems |
-| 3 | **API Contract Approved** ⚠️ | Spec Agent | The OpenAPI + DDL is a **public contract** — once downstream services depend on it, changes are expensive |
-| 4 | **Security & Quality Review** | Review Agent | LLMs miss context-specific threat models, business-logic exploits, and organisation-specific compliance requirements |
+| 1 | Requirements Validated | Discovery Agent | Confirm the agent correctly interpreted ambiguous requirements |
+| 2 | Architecture Approved | Architecture Agent + Test | Review technology choices against team expertise and existing systems |
+| 3 | **API Contract Approved** | Spec Agent | The OpenAPI + DDL is a public contract — changes after this are expensive |
+| 4 | Security and Quality Review | Review Agent | LLMs miss context-specific threat models and organisation-specific compliance requirements |
 
-> **CI/CD / unattended mode:** pass `--auto` to skip all checkpoints and run end-to-end without any pauses. Checkpoints are also auto-skipped when stdin is not a TTY (piped input, Docker, GitHub Actions).
+> **CI/CD mode:** pass `--auto` to skip all checkpoints. Checkpoints are also auto-skipped when stdin is not a TTY.
 
-### Commands at each checkpoint
+### Checkpoint 3 — API Contract (most critical)
 
-| Input | Action |
-|---|---|
-| `↵ Enter` (or any text) | Proceed to the next pipeline step |
-| `s` | Skip this checkpoint and continue (don't pause here) |
-| `a` or `abort` | Stop the pipeline immediately — all artifacts written so far are preserved |
+The pipeline pauses after the Spec Agent. Edit the contract files freely before pressing Enter:
 
-### Checkpoint 1 — Requirements Validated
-
-The pipeline pauses after the Discovery Agent and shows you what it understood: requirements, goals, constraints, scope, and top risks.
-
-**If the agent missed something or misunderstood scope:**
 ```bash
-# Type 'a' to abort, then edit your requirements file
-vim reqs.txt
-
-# Restart with corrected requirements
-python3.11 main.py --requirements reqs.txt --output-dir ./artifacts/my_run_v2
+vim artifacts/my_run/generated/specs/openapi.yaml
+vim artifacts/my_run/generated/specs/schema.sql
+# Then press Enter — Engineering implements your edited contract exactly
 ```
 
-**Inspect the full artifact at any time:**
-```bash
-cat artifacts/my_run/01_discovery_artifact.json | python3 -m json.tool | less
-```
-
-### Checkpoint 2 — Architecture Approved
-
-The pipeline pauses after Architecture design and the first testing pass. Shows architecture style, component names, and test results.
-
-**To override technology or design decisions:**
-```bash
-# Type 'a' to abort, then restart with constraints
-python3.11 main.py \
-  --requirements reqs.txt \
-  --arch-constraints "Event-sourcing with Kafka, no synchronous REST between services" \
-  --tech-constraints "Kotlin + Ktor, not Spring Boot" \
-  --output-dir ./artifacts/my_run_v2
-```
-
-### Checkpoint 3 — API Contract Approved ⚠️ Most critical
-
-The pipeline pauses after the Spec Agent and shows the OpenAPI + DDL it generated, with direct file paths.
-
-**This is the most important gate.** Once Engineering runs, all three services (BE, BFF, FE) implement against this contract. Edit the files freely at the prompt before pressing Enter:
+### Incremental feature development
 
 ```bash
-# While the pipeline is paused at Checkpoint 3:
-vim artifacts/my_run/generated/specs/openapi.yaml   # add/remove/rename endpoints
-vim artifacts/my_run/generated/specs/schema.sql     # adjust tables and columns
-
-# Then press Enter at the prompt — Engineering implements your edited contract exactly
-```
-
-**Alternatively, abort and re-run with the edited contract as the base:**
-```bash
-# Type 'a' to abort, edit the spec files, then resume
-python3.11 main.py \
-  --requirements reqs.txt \
-  --from-run ./artifacts/my_run \
-  --output-dir ./artifacts/my_run_approved
-```
-
-The Spec Agent will mark all edited paths as the approved contract with `x-existing: true`.
-
-### Checkpoint 4 — Security & Quality Review
-
-The pipeline pauses after the review loop and shows the security score, critical issue count, and a list of any blocking findings.
-
-**If there are critical issues you need to handle yourself:**
-```bash
-# Type 'a' to abort, then re-run with security constraints injected
-python3.11 main.py \
-  --requirements reqs.txt \
-  --from-run ./artifacts/my_run \
-  --arch-constraints "All endpoints require mutual TLS; secrets via AWS Secrets Manager only" \
-  --output-dir ./artifacts/my_run_secure
-```
-
-### Running without checkpoints (CI/CD)
-
-```bash
-# Skip all human review pauses — runs fully unattended
-python3.11 main.py --requirements reqs.txt --auto
-
-# Checkpoints are also automatically skipped when stdin is not a TTY:
-# e.g. piped input, Docker containers, GitHub Actions, etc.
-```
-
-### Checkpoint 5 — Incremental feature development (chain of runs)
-
-Every `--from-run` continues the contract chain. The recommended workflow for a live system:
-
-```bash
-# Sprint 1 — initial build
+# Sprint 1
 python3.11 main.py --requirements sprint1.txt --output-dir ./artifacts/sprint1
-# └─ Human review at: 01_discovery_artifact.json, 02_architecture_artifact.json,
-#    generated/specs/openapi.yaml, 04_review_artifact_iter1.json
 
-# Sprint 2 — new feature, must not break sprint 1 API
+# Sprint 2 — extends sprint 1 contract without breaking existing endpoints
 python3.11 main.py \
   --requirements sprint2.txt \
   --from-run ./artifacts/sprint1 \
   --output-dir ./artifacts/sprint2
-# └─ Spec Agent marks all sprint1 paths x-existing: true
-#    Human approves only the new paths before Engineering runs
-
-# Sprint 3 — another increment
-python3.11 main.py \
-  --requirements sprint3.txt \
-  --from-run ./artifacts/sprint2 \
-  --output-dir ./artifacts/sprint3
 ```
-
-> **Tip:** Commit each run's `generated/specs/` directory to git. Your API contract history becomes part of your codebase, with full `git diff` between sprints.
 
 ---
 
-## Resilience & Reliability
-
-The pipeline is designed to tolerate LLM non-determinism without crashing.
+## Resilience and Reliability
 
 ### Self-healing responses
 
-Every agent call goes through `_query_and_parse`. When the LLM returns malformed JSON or an object that fails Pydantic validation, the pipeline **does not abort** — it performs one self-heal attempt:
-
-1. The raw broken response + the exact error message are sent back to the LLM.
-2. The LLM is instructed to return corrected JSON with explicit rules (no dicts in list fields, all required fields present, no markdown fences).
-3. If the corrected response also fails, the original error is raised and captured in the event log — nothing is silently swallowed.
+When the LLM returns malformed JSON or an object that fails Pydantic validation, the pipeline performs one self-heal attempt: the raw broken response and exact error message are sent back to the LLM with instructions to return corrected JSON. If the corrected response also fails, the original error is raised and captured in the event log.
 
 ### LLM call retry
 
-Every LLM call retries up to 3 times (with exponential back-off) on transient errors (rate limits, network timeouts, server errors). Each retry is logged as a `retry` event.
+Every LLM call retries up to 3 times with exponential back-off on transient errors (rate limits, network timeouts, server errors).
 
 ### Coercion layer
 
-All Pydantic models have field-level coercion validators so that common LLM schema deviations never reach validation:
+Field-level coercion validators handle common LLM schema deviations before validation:
 
 | LLM deviation | Coercion applied |
 |---|---|
-| `List[str]` field contains `{"description": "..."}` objects | Extracts string value from dict |
-| `str` field returned as `{"in_scope": [...], "out_of_scope": [...]}` | Flattened to readable string |
-| `Dict[str, str]` env-vars returned as `{"value": "...", "purpose": "..."}` objects | Flattened to plain string |
+| `List[str]` field contains dict objects | Extracts string value from dict |
+| `str` field returned as scoped object | Flattened to readable string |
+| `Dict[str, str]` returned as nested objects | Flattened to plain string |
 | `List[int]` returned with string entries | Cast to `int` |
 | Missing optional list field | Defaults to `[]` |
 
 ### Full traceability
 
-Every retry, self-heal attempt, and parse error is recorded as a `PipelineEvent` (timestamp, agent, type, message, detail) and written to the **Pipeline Events** table at the bottom of `DECISIONS_LOG.md`:
+Every retry, self-heal attempt, and parse error is recorded as a `PipelineEvent` and written to `DECISIONS_LOG.md` after every completed stage:
 
 ```markdown
 ## Pipeline Events
 
-| Time                | Agent          | Type        | Message                                    |
-|---------------------|----------------|-------------|--------------------------------------------|
+| Time                | Agent          | Type        | Message                                      |
+|---------------------|----------------|-------------|----------------------------------------------|
 | 2026-03-24 17:43:12 | Review Agent   | parse_error | JSON/validation error — attempting self-heal |
 | 2026-03-24 17:43:15 | Review Agent   | self_heal   | Self-heal succeeded — corrected JSON accepted |
-| 2026-03-24 17:41:05 | Architecture.. | retry       | Attempt 1/3 failed — retrying in 5s        |
+| 2026-03-24 17:41:05 | Architecture   | retry       | Attempt 1/3 failed — retrying in 5s          |
 ```
-
-The log is written after every completed stage (not just at pipeline end) so it reflects the run state even if the pipeline is interrupted.
 
 ---
 
 ## Multi-Project Support
 
-The pipeline is **project-agnostic at the specification layer**. The Spec Agent generates a `GeneratedSpecArtifact` (OpenAPI + DDL + constraints) that drives all engineering. The sub-agents implement against this contract.
-
-### Option 1 — Tech constraints flag (no file changes needed)
+### Option 1 — Tech constraints flag
 
 ```bash
 python3.11 main.py \
@@ -621,28 +459,13 @@ python3.11 main.py \
   --tech-constraints "Python FastAPI, PostgreSQL, Next.js frontend"
 ```
 
-The Spec Agent propagates these constraints; all sub-agents honour them.
-
-### Option 2 — Edit sub-agent prompts per project
-
-Each agent's behaviour is fully controlled by a plain Markdown file in `prompts/`. No Python changes required.
-
-```
-prompts/backend_agent.md     # change Kotlin → Python / Go / Node.js
-prompts/bff_agent.md         # change WebFlux → Express / Fastify
-prompts/frontend_agent.md    # change React → Vue / Angular / Svelte
-```
-
-### Option 3 — Dedicated config file per project (recommended for teams)
+### Option 2 — Dedicated config file per project (recommended for teams)
 
 ```yaml
 # my_project/pipeline.yaml
-requirements: requirements.txt
-output_dir: ./artifacts/my_project
-
 components:
-  bff: false            # API-only: no BFF layer
-  mobile_platforms:     # generate two native apps in parallel
+  bff: false
+  mobile_platforms:
     - "iOS (Swift)"
     - "Android (Kotlin)"
 
@@ -655,180 +478,94 @@ tech:
 spec:
   tech_constraints: "PostgreSQL 16, Redis 7, JWT auth"
   arch_constraints: "12-factor app, horizontal scaling"
-  files:
-    - existing_api.yaml    # optional: existing OpenAPI spec to honour
-    - schema.sql           # optional: existing DB schema
 ```
 
 ```bash
 python3.11 main.py --config my_project/pipeline.yaml
 ```
 
-Keep one `pipeline.yaml` per project — each file is completely self-contained.
+### Option 3 — Edit agent prompts per project
+
+Each agent's behaviour is controlled by a Markdown file in `prompts/`. No Python changes required.
 
 ---
 
 ## Installation
 
-**Prerequisites:** Python 3.11+, Docker, GitHub account with a Copilot licence, GitHub CLI (`gh`).
+**Prerequisites:** Python 3.11+, Docker, GitHub CLI (`gh`).
 
 ```bash
 git clone https://github.com/vb-nattamai/llm-sdlc-workflow.git
 cd llm-sdlc-workflow
 
-# Install the package and all dependencies (editable mode — recommended for development)
 pip install -e .
 
-# Or install with dev dependencies (pytest etc.)
+# Or with dev dependencies
 pip install -e ".[dev]"
 ```
 
-> The package is installed from `src/` using [PEP 517 src layout](https://packaging.python.org/en/latest/discussions/src-layout-vs-flat-layout/). `main.py` at the repo root stays as a convenient CLI entry point, or you can use `python -m llm_sdlc_workflow` once installed.
-
 ### Authentication
 
-The pipeline calls the **GitHub Models API** — an OpenAI-compatible endpoint hosted by GitHub (backed by Azure). Authentication uses your existing **GitHub Copilot token**. No `.env` file, no OpenAI account, and no separate API credits are required.
+The pipeline calls the GitHub Models API by default — an OpenAI-compatible endpoint included with every GitHub Copilot plan. No separate API account required.
 
-#### How the token is resolved (automatic, in order)
-
-The pipeline tries two methods at startup and uses the first that succeeds:
-
-| Priority | Method | How to set it up |
-|---|---|---|
-| 1 | `GITHUB_TOKEN` environment variable | `export GITHUB_TOKEN=$(gh auth token)` |
-| 2 | GitHub CLI — `gh auth token` | Install `gh` and run `gh auth login` once |
-
-If neither is available the pipeline exits immediately with a clear error message.
-
-#### Option A — GitHub CLI (recommended, zero configuration)
+**Option A — GitHub CLI (recommended)**
 
 ```bash
-# 1. Install the GitHub CLI (if not already installed)
-#    macOS:
-brew install gh
-#    Linux:
-sudo apt install gh   # or: https://cli.github.com/
-
-# 2. Authenticate once — opens a browser flow
 gh auth login
-
-# 3. Verify the token is accessible (the pipeline calls this automatically)
-gh auth token
-
-# 4. Run the pipeline — no further setup needed
 python3.11 main.py --requirements my_requirements.txt
 ```
 
-> The pipeline calls `gh auth token` programmatically at startup. As long as your CLI session is active, nothing else is needed.
-
-#### Option B — Personal Access Token (PAT) via environment variable
-
-Use this for CI/CD pipelines, Docker containers, or environments where the GitHub CLI is not available.
+**Option B — Personal Access Token**
 
 ```bash
-# 1. Create a fine-grained PAT at: https://github.com/settings/tokens
-#    Required permission: Models → Read-only  (listed as "models:read")
-#    No repository or organisation permissions needed.
-
-# 2. Export the token in your shell session
 export GITHUB_TOKEN=github_pat_XXXXXXXXXXXXXXXXXXXX
-
-# 3. (Optional) Add to your shell profile to persist across sessions
-echo 'export GITHUB_TOKEN=github_pat_XXXXXXXXXXXXXXXXXXXX' >> ~/.zshrc
-
-# 4. Run the pipeline
 python3.11 main.py --requirements my_requirements.txt
 ```
 
-> **Never hardcode the token in source files or commit it to git.** The `.gitignore` in this repo already excludes `.env` and `.env.*` files — store it there if you prefer a file-based approach:
-> ```bash
-> echo 'GITHUB_TOKEN=github_pat_XXXXXXXXXXXXXXXXXXXX' >> .env
-> source .env   # or use direnv / dotenv
-> ```
+### Bring Your Own API Key
 
-#### Required: GitHub Copilot licence
-
-GitHub Models access is **included with every GitHub Copilot plan** (Free, Pro, Business, Enterprise). The plan determines your daily rate limits:
-
-| Model tier | Model examples | Copilot Free/Pro | Copilot Business | Copilot Enterprise |
-|---|---|---|---|---|
-| **High** | `gpt-4o` (default) | **50 req/day** | **100 req/day** | **150 req/day** |
-| **Low** | `gpt-4o-mini` | **150 req/day** | **300 req/day** | **450 req/day** |
-| Concurrent requests | all models | 2 | 2 | 4 |
-
-> `gpt-4o` is a **High** model. A full pipeline run makes many calls (one per agent plus chunked file generation), so it can exhaust the daily quota. See [Choosing a model](#choosing-a-model) below.
-
-#### Choosing a model
-
-Override the default `gpt-4o` with the `--model` flag or the `PIPELINE_MODEL` environment variable:
-
-```bash
-# Cheaper, 3× higher daily limit — good for experimentation
-python3.11 main.py --requirements reqs.txt --model gpt-4o-mini
-
-# Set a persistent default
-export PIPELINE_MODEL=gpt-4o-mini
-```
-
-| Use case | Recommended model | Daily limit (Pro) |
-|---|---|---|
-| Full production pipeline | `gpt-4o` | 50 req/day |
-| Rapid iteration / experimentation | `gpt-4o-mini` | 150 req/day |
-| Best quality, slow | `o3-mini` | 12 req/day |
-
-#### Rate limit errors
-
-If you hit the daily quota you will see:
-
-```
-Error code: 429 - Rate limit of 100 per 86400s exceeded for UserByModelByDay.
-Please wait 69116 seconds before retrying.
-```
-
-Options:
-- **Wait** — the quota resets every 24 hours.
-- **Switch models** — `--model gpt-4o-mini` has a 3× higher daily allowance.
-- **Use your own API key** — see [Bring Your Own API Key](#bring-your-own-api-key) below.
-
-#### Bring Your Own API Key
-
-Two environment variables let you swap the provider without touching any code:
+Three environment variables control the provider:
 
 | Variable | Purpose | Default |
 |---|---|---|
 | `PIPELINE_BASE_URL` | API endpoint (any OpenAI-compatible URL) | `https://models.inference.ai.azure.com` |
-| `PIPELINE_API_KEY` | API key for the provider (overrides GitHub token resolution) | _(uses GitHub token)_ |
+| `PIPELINE_API_KEY` | API key (overrides GitHub token) | GitHub token |
 | `PIPELINE_MODEL` | Model name | `gpt-4o` |
 
-When `PIPELINE_API_KEY` is set, `GITHUB_TOKEN` and `gh auth token` are ignored entirely.
+### Provider Quick Reference
 
-##### Setting variables in your GitHub repository
+| Provider | `PIPELINE_BASE_URL` | Recommended model |
+|---|---|---|
+| GitHub Models (default) | `https://models.inference.ai.azure.com` | `gpt-4o` |
+| Anthropic | `https://api.anthropic.com/v1` | `claude-haiku-4-5-20251001` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o` |
+| xAI Grok | `https://api.x.ai/v1` | `grok-3-beta` |
+| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` | `gemini-2.0-flash` |
+| Mistral | `https://api.mistral.ai/v1` | `mistral-large-latest` |
+| Ollama (local) | `http://localhost:11434/v1` | `llama3.3` |
 
-API keys must **never** be committed to source code. GitHub provides two secure storage mechanisms depending on whether the value is sensitive:
-
-| Type | Use for | Visible in logs? | CLI to set |
-|---|---|---|---|
-| **Secret** | `PIPELINE_API_KEY` (any API key) | ❌ Always masked | `gh secret set` |
-| **Variable** | `PIPELINE_BASE_URL`, `PIPELINE_MODEL` (non-sensitive config) | ✅ Visible | `gh variable set` |
-
-**Via GitHub CLI (fastest):**
+**Anthropic example:**
 
 ```bash
-# Store the API key as an encrypted secret (value is never shown in logs)
-gh secret set PIPELINE_API_KEY --body "xai-xxxxxxxxxxxxxxxxxxxx"
-
-# Store the endpoint and model as plain variables (non-sensitive)
-gh variable set PIPELINE_BASE_URL --body "https://api.x.ai/v1"
-gh variable set PIPELINE_MODEL    --body "grok-3-beta"
+export PIPELINE_BASE_URL="https://api.anthropic.com/v1"
+export PIPELINE_API_KEY="$ANTHROPIC_API_KEY"
+export PIPELINE_MODEL="claude-haiku-4-5-20251001"
+python3.11 main.py --requirements reqs.txt --auto
 ```
 
-**Via GitHub web UI:**
+**Ollama (local, no API costs):**
 
-1. Go to your repository → **Settings** → **Secrets and variables** → **Actions**
-2. For `PIPELINE_API_KEY` → click **New repository secret**
-3. For `PIPELINE_BASE_URL` and `PIPELINE_MODEL` → switch to the **Variables** tab → click **New repository variable**
+```bash
+ollama pull llama3.3
+ollama serve
 
-**Using them in a GitHub Actions workflow:**
+export PIPELINE_API_KEY=ollama
+export PIPELINE_BASE_URL=http://localhost:11434/v1
+export PIPELINE_MODEL=llama3.3
+python3.11 main.py --requirements reqs.txt
+```
+
+### GitHub Actions
 
 ```yaml
 # .github/workflows/pipeline.yml
@@ -839,214 +576,40 @@ on:
     inputs:
       requirements:
         description: "Path to requirements file"
-        default: "hello_world_requirements.txt"
+        default: "examples/hello_world_requirements.txt"
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - run: pip install -e ".[dev]"
-
       - name: Run pipeline
         env:
           PIPELINE_API_KEY:  ${{ secrets.PIPELINE_API_KEY }}
           PIPELINE_BASE_URL: ${{ vars.PIPELINE_BASE_URL }}
           PIPELINE_MODEL:    ${{ vars.PIPELINE_MODEL }}
-        run: |
-          python3.11 main.py \
-            --requirements ${{ github.event.inputs.requirements }} \
-            --auto
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        run: python3.11 main.py --requirements ${{ github.event.inputs.requirements }} --auto
+      - uses: actions/upload-artifact@v4
         with:
           name: pipeline-artifacts
           path: artifacts/
 ```
 
-> `--auto` is required in CI — it skips all human review checkpoints since stdin is not a TTY. Alternatively, the pipeline skips checkpoints automatically when stdin is not a TTY (piped input, Docker, GitHub Actions), so `--auto` is only needed if you want to be explicit.
-
-**For GitHub Models (default) in CI — no secret needed:**
-
-If you are using the default GitHub Models endpoint, you do not need `PIPELINE_API_KEY` at all. GitHub Actions provides `GITHUB_TOKEN` automatically with `models:read` permission:
-
-```yaml
-      - name: Run pipeline (GitHub Models — no API key needed)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   # automatically provided
-        run: python3.11 main.py --requirements reqs.txt --auto
-```
-
----
-
-#### Available models on GitHub Models (no code changes, no extra account)
-
-All of these work with your existing GitHub token and the `--model` flag. GitHub Models hosts models from multiple providers:
-
-```bash
-# xAI Grok — available directly on GitHub Models
-python3.11 main.py --requirements reqs.txt --model xai-grok-3
-python3.11 main.py --requirements reqs.txt --model xai-grok-3-mini   # higher rate limit
-
-# DeepSeek R1 (open-weight reasoning model)
-python3.11 main.py --requirements reqs.txt --model DeepSeek-R1
-
-# Meta Llama 3
-python3.11 main.py --requirements reqs.txt --model meta-llama-3.1-405b-instruct
-
-# Mistral (hosted on GitHub Models)
-python3.11 main.py --requirements reqs.txt --model Mistral-large-2411
-
-# Microsoft Phi
-python3.11 main.py --requirements reqs.txt --model Phi-4
-```
-
-> Browse the full catalogue at [github.com/marketplace/models](https://github.com/marketplace/models). Use the exact model name shown there as the `--model` value.
-
----
-
-#### OpenAI (direct, bypasses GitHub Models)
-
-```bash
-export PIPELINE_API_KEY=sk-...                    # your OpenAI API key
-export PIPELINE_BASE_URL=https://api.openai.com/v1
-export PIPELINE_MODEL=gpt-4o                     # or gpt-4o-mini, o3-mini, etc.
-
-python3.11 main.py --requirements reqs.txt
-```
-
----
-
-#### xAI Grok (direct API)
-
-xAI's API is fully OpenAI-compatible — swap the endpoint and key:
-
-```bash
-export PIPELINE_API_KEY=xai-...                   # from console.x.ai
-export PIPELINE_BASE_URL=https://api.x.ai/v1
-export PIPELINE_MODEL=grok-3-beta                # or grok-3-mini-beta
-
-python3.11 main.py --requirements reqs.txt
-```
-
----
-
-#### Google Gemini
-
-Google exposes an OpenAI-compatible endpoint for Gemini models:
-
-```bash
-export PIPELINE_API_KEY=AIza...                   # from aistudio.google.com/app/apikey
-export PIPELINE_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
-export PIPELINE_MODEL=gemini-2.0-flash           # or gemini-2.5-pro-preview-03-25
-
-python3.11 main.py --requirements reqs.txt
-```
-
-> Get a free API key at [aistudio.google.com](https://aistudio.google.com/app/apikey) — no billing required for Gemini Flash.
-
----
-
-#### Mistral (direct API)
-
-```bash
-export PIPELINE_API_KEY=...                       # from console.mistral.ai
-export PIPELINE_BASE_URL=https://api.mistral.ai/v1
-export PIPELINE_MODEL=mistral-large-latest       # or mistral-small-latest
-
-python3.11 main.py --requirements reqs.txt
-```
-
----
-
-#### Anthropic Claude (direct — no proxy needed)
-
-Anthropic exposes an OpenAI-compatible endpoint at `https://api.anthropic.com/v1`. The pipeline supports it natively — no LiteLLM proxy required:
-
-```bash
-export PIPELINE_API_KEY=sk-ant-...                 # from console.anthropic.com
-export PIPELINE_BASE_URL=https://api.anthropic.com/v1
-export PIPELINE_MODEL=claude-haiku-4-5-20251001    # or claude-opus-4-5, claude-sonnet-4-5
-
-python3.11 main.py --requirements reqs.txt
-```
-
-The pipeline automatically detects the Anthropic endpoint and:
-- Omits `response_format: json_object` (not supported by Anthropic's compat layer)
-- Limits concurrency to 1 (Anthropic's 10k output-tokens/min org limit)
-- Adds a 2s inter-call delay between file generation calls
-
-| Model | Quality | Speed | Cost tier |
-|---|---|---|---|
-| `claude-haiku-4-5-20251001` | Good | Fastest | Lowest |
-| `claude-sonnet-4-5-20251001` | Great | Medium | Medium |
-| `claude-opus-4-5-20251001` | Best | Slowest | Highest |
-
-Alternatively, use Claude through a **LiteLLM proxy**, **AWS Bedrock**, or **Google Vertex AI** if you prefer those routing layers:
-
-```bash
-# Via LiteLLM proxy (optional)
-pip install litellm[proxy]
-ANTHROPIC_API_KEY=sk-ant-... litellm --model claude-opus-4-5 --port 4000
-export PIPELINE_BASE_URL=http://localhost:4000
-export PIPELINE_MODEL=claude-opus-4-5
-```
-
----
-
-#### Local models via Ollama
-
-Run any model locally with [Ollama](https://ollama.com) — no internet, no API costs:
-
-```bash
-# 1. Install Ollama and pull a model
-brew install ollama
-ollama pull llama3.3         # or mistral, phi4, deepseek-r1, etc.
-ollama serve                 # starts on http://localhost:11434
-
-# 2. Point the pipeline at Ollama's OpenAI-compatible endpoint
-export PIPELINE_API_KEY=ollama            # any non-empty string
-export PIPELINE_BASE_URL=http://localhost:11434/v1
-export PIPELINE_MODEL=llama3.3
-
-python3.11 main.py --requirements reqs.txt
-```
-
-> ⚠️ Local models are generally less capable at structured JSON generation than frontier models. The pipeline uses `response_format: json_object` — ensure your chosen Ollama model supports it (Llama 3.3, Mistral, Phi-4 do).
-
----
-
-#### Provider quick-reference
-
-| Provider | `PIPELINE_BASE_URL` | `PIPELINE_API_KEY` source | Recommended model |
-|---|---|---|---|
-| GitHub Models _(default)_ | `https://models.inference.ai.azure.com` | `gh auth token` / `GITHUB_TOKEN` | `gpt-4o` |
-| OpenAI | `https://api.openai.com/v1` | [platform.openai.com](https://platform.openai.com/api-keys) | `gpt-4o` |
-| xAI Grok | `https://api.x.ai/v1` | [console.x.ai](https://console.x.ai) | `grok-3-beta` |
-| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` | [aistudio.google.com](https://aistudio.google.com/app/apikey) | `gemini-2.0-flash` |
-| Mistral | `https://api.mistral.ai/v1` | [console.mistral.ai](https://console.mistral.ai) | `mistral-large-latest` |
-| Anthropic Claude | `https://api.anthropic.com/v1` | [console.anthropic.com](https://console.anthropic.com) | `claude-haiku-4-5-20251001` |
-| Ollama (local) | `http://localhost:11434/v1` | any string | `llama3.3` |
-
-> With your own key, rate limits and billing are managed entirely by your chosen provider — not GitHub.
-
 ---
 
 ## Usage
 
-### New Project — from scratch
+### New project from scratch
 
 ```bash
-# Quickstart: uses the built-in Task Management API example
+# Built-in example
 python3.11 main.py
 
-# Your own requirements file
+# Your own requirements
 python3.11 main.py --requirements my_requirements.txt
 
 # With tech-stack constraints
@@ -1055,148 +618,102 @@ python3.11 main.py \
   --tech-constraints "Kotlin Spring Boot, React 18, PostgreSQL" \
   --output-dir ./artifacts/my_project
 
-# Enter requirements interactively
-python3.11 main.py --interactive
-
-# Via config file (recommended for teams)
+# Via config file
 python3.11 main.py --config pipeline.yaml
 ```
 
-### Incremental Development — extending an existing contract
-
-Use `--from-run` to load the OpenAPI + DDL from a previous run and extend it rather than generating from scratch. The Spec Agent will:
-
-- Mark all existing API paths with `x-existing: true` — sub-agents must not break them
-- Mark existing DB tables `-- EXISTING: DO NOT ALTER`
-- Add only new endpoints and tables from the new requirements
+### Incremental development — extending an existing contract
 
 ```bash
-# Run 1 — initial build
+# Run 1
 python3.11 main.py \
   --requirements v1_requirements.txt \
   --output-dir ./artifacts/run_v1
 
-# Run 2 — add a new feature without breaking the live API
+# Run 2 — adds new features without breaking the live API
 python3.11 main.py \
   --requirements v2_new_feature.txt \
   --from-run ./artifacts/run_v1 \
   --output-dir ./artifacts/run_v2
-
-# Run 3 — another increment on top of run 2
-python3.11 main.py \
-  --requirements v3_requirements.txt \
-  --from-run ./artifacts/run_v2 \
-  --output-dir ./artifacts/run_v3
 ```
 
-The chain is fully composable — every run reads `generated/specs/` from the previous run.
+The Spec Agent marks all existing paths `x-existing: true`. Engineering agents must not break them.
 
 ### All CLI Flags
 
 ```
-# ─── Input / output ──────────────────────────────────────────────────────────
+# Input / output
 --requirements FILE       Path to a requirements text file
---interactive             Type requirements at the terminal (stdin)
---config FILE             Load configuration from a pipeline.yaml (CLI flags override)
---spec FILE               Spec file (OpenAPI YAML, SQL DDL, etc.) — repeatable
---output-dir DIR          Artifacts output directory (default: artifacts/run_YYYYMMDD_HHMMSS)
---project-name NAME       Generated code directory name (prompts if omitted)
+--interactive             Type requirements at the terminal
+--config FILE             Load configuration from pipeline.yaml
+--spec FILE               Spec file (OpenAPI YAML, SQL DDL) — repeatable
+--output-dir DIR          Artifacts output directory
+--project-name NAME       Generated code directory name
 --from-run DIR            Extend the existing contract from a previous run
 
-# ─── Constraints ─────────────────────────────────────────────────────────────
+# Constraints
 --tech-constraints STR    e.g. "Python FastAPI, PostgreSQL, Redis"
 --arch-constraints STR    e.g. "Microservices on Kubernetes"
 
-# ─── Execution ───────────────────────────────────────────────────────────────
+# Execution
 --auto                    Skip all human review checkpoints (CI/CD mode)
---model MODEL             LLM model (default: gpt-4o, or PIPELINE_MODEL env var)
---max-review-iterations N Max review → patch cycles (default: 3, or pipeline.yaml pipeline.max_review_iterations)
+--model MODEL             LLM model (default: gpt-4o)
+--max-review-iterations N Max review cycles (default: 3)
 
-# ─── Component toggles ───────────────────────────────────────────────────────
---bff                     Enable BFF sub-agent (disabled by default)
---frontend                Enable Frontend sub-agent (disabled by default)
---no-bff                  Explicitly disable BFF (backward-compat alias; --bff not passed = same effect)
---no-frontend             Explicitly disable Frontend (backward-compat alias)
+# Component toggles
+--bff                     Enable BFF sub-agent
+--frontend                Enable Frontend sub-agent
 --mobile                  Enable Mobile sub-agent (React Native by default)
 
-# ─── Tech-stack preferences ──────────────────────────────────────────────────
---backend-lang LANG       Backend language, e.g. "Python", "Go", "Node.js" (default: Python)
---backend-framework FW    Backend framework, e.g. "FastAPI", "Gin"  (default: FastAPI)
---bff-lang LANG           BFF language (default: Kotlin)
---bff-framework FW        BFF framework, e.g. "NestJS"  (default: Spring WebFlux)
---frontend-framework FW   Frontend framework, e.g. "Vue", "Next.js"  (default: React 18)
---frontend-lang LANG      Frontend language  (default: TypeScript)
---mobile-platform PLAT    Mobile platform — can be given MULTIPLE TIMES to generate
-                          several platforms in parallel:
-                            --mobile-platform "iOS (Swift)"
-                            --mobile-platform "iOS (Swift)" --mobile-platform "Android (Kotlin)"
-                          Valid values: "React Native", "Flutter",
-                                        "iOS (Swift)", "Android (Kotlin)"
-                          Default (when --mobile is set): React Native
+# Tech-stack preferences
+--backend-lang LANG       e.g. "Python", "Go", "Node.js"
+--backend-framework FW    e.g. "FastAPI", "Gin"
+--bff-lang LANG
+--bff-framework FW        e.g. "NestJS"
+--frontend-framework FW   e.g. "Vue", "Next.js"
+--frontend-lang LANG
+--mobile-platform PLAT    Repeatable: "React Native", "Flutter", "iOS (Swift)", "Android (Kotlin)"
 ```
 
 ---
 
 ## Output Structure
 
-Each run creates a timestamped directory under `artifacts/`:
-
 ```
 artifacts/run_20260318_120000/
-├── 00_pipeline_report.json              # overall pass/fail + summary metrics
-├── 01_discovery_artifact.json           # Discovery Agent output
-├── 02_architecture_artifact.json        # Architecture Agent output
-├── 03_engineering_artifact.json         # Engineering Agent (merged) output
-├── 03a_backend_artifact.json            # Backend sub-agent output
-├── 03b_bff_artifact.json                # BFF sub-agent output  (omitted when --no-bff)
-├── 03c_frontend_artifact.json           # Frontend sub-agent output  (omitted when --no-frontend)
-├── 03d_mobile_react_native_artifact.json  # Mobile agent — React Native  (one file per platform)
-├── 03d_mobile_ios_swift_artifact.json     # Mobile agent — iOS (Swift)
-├── 03d_mobile_android_kotlin_artifact.json# Mobile agent — Android (Kotlin)
-├── 04_generated_spec_artifact.json      # Spec Agent — forward contract
-├── 04_review_artifact_iter<N>.json      # Review Agent output (one file per iteration)
-├── 05a_testing_architecture.json        # Testing: architecture stage
-├── 05b_testing_infrastructure.json      # Testing: live HTTP stage
-├── 05c_testing_review.json              # Testing: final sign-off
-├── 06a_infrastructure_plan_artifact.json  # Infrastructure Agent — IaC plan
-├── 06b_infrastructure_apply_artifact.json # Infrastructure Agent — containers started
-├── 07_deployment_artifact.json           # Deployment Agent — CI/CD + K8s + Helm
-├── *_agent_history.json                 # full LLM conversation history per agent
-├── DECISIONS_LOG.md                     # ← human-readable audit log of all agent decisions
-│   │                                        #   + Pipeline Events table (retries, self-heals)
-│   │                                        #   Updated after EVERY completed stage
-└── generated/                           # ← all generated source code + IaC
-    ├── backend/                         # Language/framework — configurable (tech-agnostic)
-    │   ├── build.gradle.kts             #   (or pyproject.toml, go.mod, package.json …)
-    │   ├── src/main/kotlin/...
-    │   └── Dockerfile
-    ├── bff/                             # Configurable (tech-agnostic) — optional
-    │   ├── build.gradle.kts
-    │   ├── src/main/kotlin/...
-    │   └── Dockerfile
-    ├── frontend/                        # Configurable (tech-agnostic) — optional
-    │   ├── package.json
-    │   ├── src/
-    │   ├── nginx.conf
-    │   └── Dockerfile
-    ├── mobile_react_native/             # React Native (Expo) — one dir per platform
-    ├── mobile_ios_swift/                # iOS (Swift) — when --mobile-platform "iOS (Swift)"
-    ├── mobile_android_kotlin/           # Android — when --mobile-platform "Android (Kotlin)"
-    ├── mobile_flutter/                  # Flutter — when --mobile-platform Flutter
-    ├── specs/                           # Forward contract (use with --from-run)
-    │   ├── openapi.yaml                 # OpenAPI 3.0 — all endpoints
-    │   └── schema.sql                   # SQL DDL — all tables
-    ├── deployment/                      # CI/CD + Kubernetes + Helm
-    │   ├── .github/workflows/           # ci.yml, cd-staging.yml, cd-production-canary.yml
-    │   │   ├── ci.yml                   #   cd-production-blue-green.yml, security-scan.yml
-    │   │   └── ...                      #   rollback.yml
-    │   ├── k8s/                         # Base K8s manifests (Deployment, Service, Ingress, HPA, PDB)
-    │   │   ├── blue-green/              # Blue-green Deployment pairs + switch.sh
-    │   │   └── canary/                  # Argo Rollout CRD + AnalysisTemplate
-    │   ├── helm/                        # Helm chart (Chart.yaml, values per env, templates/)
-    │   ├── scripts/                     # deploy.sh, rollback.sh, canary-promote.sh
-    │   └── Makefile                     # make deploy-staging / deploy-production / rollback
-    └── docker-compose.yml               # starts the full monorepo stack
+├── 00_pipeline_report.json
+├── 01_discovery_artifact.json
+├── 02_architecture_artifact.json
+├── 03_engineering_artifact.json
+├── 03a_backend_artifact.json
+├── 03b_bff_artifact.json
+├── 03c_frontend_artifact.json
+├── 03d_mobile_react_native_artifact.json
+├── 04_generated_spec_artifact.json
+├── 04_review_artifact_iter<N>.json
+├── 05a_testing_architecture.json
+├── 05b_testing_infrastructure.json
+├── 05c_testing_review.json
+├── 06a_infrastructure_plan_artifact.json
+├── 06b_infrastructure_apply_artifact.json
+├── 07_deployment_artifact.json
+├── DECISIONS_LOG.md
+└── generated/
+    ├── backend/
+    ├── bff/
+    ├── frontend/
+    ├── mobile_react_native/
+    ├── mobile_ios_swift/
+    ├── mobile_android_kotlin/
+    ├── specs/
+    │   ├── openapi.yaml
+    │   └── schema.sql
+    ├── deployment/
+    │   ├── .github/workflows/
+    │   ├── k8s/
+    │   ├── helm/
+    │   └── scripts/
+    └── docker-compose.yml
 ```
 
 The `generated/specs/` directory is what `--from-run` reads on the next run.
@@ -1206,64 +723,53 @@ The `generated/specs/` directory is what `--from-run` reads on the next run.
 ## Project Structure
 
 ```
-llm-sdlc-workflow/                        ← repo root
-├── main.py                               # CLI entry point (python main.py ...)
-├── pyproject.toml                        # package metadata + dependencies (PEP 517)
-├── pipeline.yaml                         # pipeline config template — copy per project
-├── README.md
-├── .gitignore
+llm-sdlc-workflow/
+├── main.py
+├── pyproject.toml
+├── pipeline.yaml
 │
 ├── src/
-│   └── llm_sdlc_workflow/               # installable Python package
-│       ├── __init__.py                  # package version
-│       ├── __main__.py                  # python -m llm_sdlc_workflow entry point
-│       ├── pipeline.py                  # orchestrator — accepts PipelineConfig
-│       ├── config.py                    # PipelineConfig, ComponentConfig, TechConfig
-│       │
-│       ├── agents/                      # one file per AI agent
-│       │   ├── base_agent.py            # shared: LLM client, retry, chunked gen, I/O
-│       │   ├── discovery_agent.py       # DiscoveryAgent   → DiscoveryArtifact
-│       │   ├── architecture_agent.py    # ArchitectureAgent → ArchitectureArtifact
-│       │   ├── spec_agent.py            # SpecAgent        → GeneratedSpecArtifact
-│       │   ├── engineering_agent.py     # EngineeringAgent → runs only enabled sub-agents
-│       │   ├── backend_agent.py         # accepts language= / framework= overrides
-│       │   ├── bff_agent.py             # accepts language= / framework= overrides
-│       │   ├── frontend_agent.py        # accepts framework= / language= overrides
-│       │   ├── mobile_agent.py          # MobileAgent — React Native / Flutter / Swift / Kotlin
-│       │   ├── infrastructure_agent.py  # Dockerfiles + docker-compose
-│       │   ├── deployment_agent.py      # DeploymentAgent — GitHub Actions + K8s + Helm + canary/blue-green
-│       │   ├── review_agent.py          # OWASP security + code quality loop
-│       │   └── testing_agent.py         # 3-stage: arch → live HTTP → final
-│       │
+│   └── llm_sdlc_workflow/
+│       ├── pipeline.py
+│       ├── config.py
+│       ├── agents/
+│       │   ├── base_agent.py
+│       │   ├── discovery_agent.py
+│       │   ├── architecture_agent.py
+│       │   ├── spec_agent.py
+│       │   ├── engineering_agent.py
+│       │   ├── backend_agent.py
+│       │   ├── bff_agent.py
+│       │   ├── frontend_agent.py
+│       │   ├── mobile_agent.py
+│       │   ├── infrastructure_agent.py
+│       │   ├── deployment_agent.py
+│       │   ├── review_agent.py
+│       │   └── testing_agent.py
 │       ├── models/
-│       │   └── artifacts.py             # all Pydantic models (typed inter-agent data)
-│       │
-│       └── prompts/                     # agent system prompts — edit without touching Python
+│       │   └── artifacts.py
+│       └── prompts/
 │           ├── discovery_agent.md
 │           ├── architecture_agent.md
 │           ├── spec_agent.md
-│           ├── backend_agent.md         # tech-agnostic backend persona
-│           ├── bff_agent.md             # tech-agnostic BFF persona
-│           ├── frontend_agent.md        # tech-agnostic frontend persona
-│           ├── mobile_agent.md          # React Native (Expo), Flutter, Swift, Kotlin variants
+│           ├── backend_agent.md
+│           ├── bff_agent.md
+│           ├── frontend_agent.md
+│           ├── mobile_agent.md
 │           ├── infrastructure_agent.md
-│           ├── deployment_agent.md      # GitHub Actions CI/CD, K8s, Helm, canary, blue-green
+│           ├── deployment_agent.md
 │           ├── review_agent.md
 │           └── testing_agent.md
 │
-├── tests/                               # pytest test suite
+├── tests/
 │   ├── test_artifacts.py
 │   └── test_pipeline.py
 │
-├── examples/
-│   ├── status_api_requirements.txt      # minimal single-endpoint API (simplest — best for first run)
-│   ├── ping_echo_requirements.txt       # Tech-agnostic ping + echo endpoints
-│   ├── todo_api_requirements.txt        # full CRUD TODO API with persistence
-│   └── hello_world_requirements.txt    # full 3-tier (backend + BFF + frontend)
-│
-└── .github/
-    └── workflows/
-        └── pipeline.yml                 # GitHub Actions — run pipeline via workflow_dispatch
+└── examples/
+    ├── status_api_requirements.txt
+    ├── ping_echo_requirements.txt
+    ├── todo_api_requirements.txt
+    └── hello_world_requirements.txt
 ```
 
 ---
@@ -1280,42 +786,47 @@ The JSON schema at the bottom of each prompt file defines the artifact structure
 
 | Agent | SDLC Phase | Description |
 |---|---|---|
-| **DocumentationAgent** | Docs | API docs (Swagger UI config), Architecture Decision Records, runbooks, onboarding guides |
-| **ObservabilityAgent** | Ops | Prometheus metrics endpoints, structured logging config, OpenTelemetry tracing setup |
-| **MigrationAgent** | Database | Flyway / Liquibase migration scripts with rollback procedures |
-| **PerformanceAgent** | Testing | k6 / Gatling load test scripts, SLA budgets, bottleneck analysis |
-| **ComplianceAgent** | Governance | GDPR data map, SOC2 controls checklist, HIPAA PHI handling guide |
-| **SecurityScanAgent** | Security | SAST output triage, dependency CVE report, secrets detection |
-| **MaintenanceAgent** | Maintenance | Dependency update PRs, technical debt scoring, refactoring recommendations |
+| DocumentationAgent | Docs | Swagger UI config, Architecture Decision Records, runbooks |
+| ObservabilityAgent | Ops | Prometheus metrics, structured logging, OpenTelemetry tracing |
+| MigrationAgent | Database | Flyway / Liquibase migration scripts with rollback |
+| PerformanceAgent | Testing | k6 / Gatling load test scripts, SLA budgets |
+| ComplianceAgent | Governance | GDPR data map, SOC2 controls checklist, HIPAA PHI handling |
+| SecurityScanAgent | Security | SAST output triage, dependency CVE report, secrets detection |
+| MaintenanceAgent | Maintenance | Dependency update PRs, technical debt scoring |
 
 ---
 
 ## How It Works
 
-1. **Single HTTP client for all providers** — all LLM calls go through the **OpenAI Python SDK** (`AsyncOpenAI`), used as a generic HTTP client. Every supported provider (GitHub Models, Anthropic, xAI, Google Gemini, Mistral, Ollama) exposes an OpenAI-compatible REST endpoint, so swapping providers is purely a matter of changing `PIPELINE_BASE_URL` and `PIPELINE_API_KEY` — no code changes, no extra packages.
+1. **Single HTTP client for all providers** — all LLM calls go through the OpenAI Python SDK used as a generic HTTP client. Swapping providers is purely a matter of changing `PIPELINE_BASE_URL` and `PIPELINE_API_KEY`.
 
-2. **Chunked LLM generation** — each agent generates files in two LLM calls: first a plan with all content `__PENDING__`, then one call per file to fill it. Prevents token-limit failures on large codebases.
+2. **Chunked LLM generation** — each agent generates files in two LLM calls: first a plan with all content marked `__PENDING__`, then one call per file to fill it. Prevents token-limit failures on large codebases.
 
-3. **Contract-first spec** — the Spec Agent generates an OpenAPI + DDL contract *before* any code is written. All three engineering sub-agents implement against this single source of truth, ensuring consistency from day one.
+3. **Contract-first spec** — the Spec Agent generates an OpenAPI + DDL contract before any code is written. All engineering sub-agents implement against this single source of truth.
 
-4. **Parallel sub-agents** — Only the *enabled* sub-agents run, via `asyncio.gather`. Disable BFF or Frontend with a flag; add Mobile with `--mobile`. Infrastructure planning also runs in parallel with Engineering. After the review loop, the **Infrastructure Agent** (start containers) and **Deployment Agent** (CI/CD + K8s + Helm) both run in parallel.
+4. **Parallel sub-agents** — only enabled sub-agents run, via `asyncio.gather`. Infrastructure planning also runs in parallel with Engineering. After the review loop, the Infrastructure Agent and Deployment Agent both run in parallel.
 
-5. **Review feedback loop** — the Review Agent runs up to 3 times. If critical issues are found, Engineering and Infrastructure both re-generate in parallel with the feedback applied. Review scores are **deterministic**: start at 100 and deduct fixed points per issue severity, weighted across security/reliability/maintainability/performance dimensions.
+5. **Deterministic review scoring** — start at 100, deduct fixed points per issue severity, weighted across security/reliability/maintainability/performance. Results are reproducible across iterations.
 
 6. **Compact context** — each agent receives a compact summary of upstream artifacts, not raw JSON blobs. Keeps prompts lean and LLM calls fast.
 
 7. **Incremental contracts** — `--from-run` marks existing API paths `x-existing: true` so new runs only add endpoints, never silently break a live API.
 
-8. **Full decision traceability** — every agent records `DecisionRecord` entries (what was decided, why, alternatives rejected). A `DECISIONS_LOG.md` is written to the run directory after every run — a human-readable audit trail of all agent decisions across all pipeline stages.
+8. **Full decision traceability** — every agent records `DecisionRecord` entries in `DECISIONS_LOG.md`, written after every completed stage.
 
-9. **Topology contract** — the pipeline computes a `TopologyContract` before any agent runs. It assigns canonical ports to every service (backend-only → 8080; full-stack → backend:8081, BFF:8080, frontend:3000) and injects this contract into every agent that generates ports, Dockerfiles, or docker-compose. Prevents port-mismatch bugs where one agent picks 8080 and another picks 8081.
+9. **Topology contract** — the pipeline computes canonical port assignments before any agent runs and injects this contract into every agent that generates ports, Dockerfiles, or docker-compose. Prevents port-mismatch bugs across services.
 
 ---
 
 ## Requirements
 
 - Python 3.11+
-- **`openai` Python package** (`pip install -e .` installs it) — used as the HTTP client for every LLM provider; no `anthropic` or provider-specific SDK needed
+- `openai` Python package (installed via `pip install -e .`)
 - GitHub CLI (`gh`) authenticated with a GitHub Copilot licence — only required when using the default GitHub Models endpoint
-- Docker (Docker Desktop or Docker Engine) — for the Infrastructure Agent to build and start containers
-- Python packages: managed via `pyproject.toml` — install with `pip install -e .`
+- Docker — for the Infrastructure Agent to build and start containers
+
+---
+
+## License
+
+MIT
